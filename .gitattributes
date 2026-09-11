@@ -1,0 +1,9 @@
+# Normalize source files in the repository and working tree.
+* text=auto eol=lf
+
+# Keep shell scripts compatible with WSL/Linux.
+*.sh text eol=lf
+
+# Keep Windows command files compatible with native Windows tooling.
+*.bat text eol=crlf
+*.cmd text eol=crlf
