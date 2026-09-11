@@ -75,6 +75,28 @@ A substituicao deve preservar, conforme aplicavel:
 - telemetria;
 - compatibilidade de dados.
 
+### 6. Ambiente de desenvolvimento local
+
+O desenvolvimento local usara WSL2/Debian como ambiente principal, com Docker Desktop integrado ao WSL2.
+
+O Docker Compose sera usado para executar as dependencias externas do ambiente local:
+
+- PostgreSQL;
+- Keycloak;
+- Mailpit para testes locais de e-mail.
+
+A aplicacao Python sera executada diretamente no WSL por meio do Poetry, facilitando o ciclo de desenvolvimento, o debug e o reload. O frontend tambem sera executado localmente conforme o framework que vier a ser escolhido.
+
+O PostgreSQL local usara bancos separados para a aplicacao e para o Keycloak, evitando misturar seus dados mesmo compartilhando o mesmo servidor local.
+
+Redis, Celery, RabbitMQ ou outra infraestrutura de processamento assincrono somente serao adicionados quando esse mecanismo for definido e houver necessidade comprovada. Ferramentas administrativas adicionais, como uma interface para PostgreSQL, sao opcionais e nao fazem parte do ambiente minimo.
+
+O Docker Compose sera utilizado para desenvolvimento local e para apoiar testes de integracao/CI. Ele nao define a estrategia de producao: nessa etapa serao avaliados banco gerenciado, hospedagem da aplicacao e forma de operacao do Keycloak.
+
+### 7. Framework HTTP do backend
+
+O backend HTTP do MVP usara FastAPI, com Uvicorn como servidor ASGI. A camada HTTP permanecera na borda da aplicacao e nao sera acessada diretamente pelo dominio.
+
 ## Regras de implementacao
 
 - Nao importar bibliotecas de infraestrutura no dominio.
