@@ -87,6 +87,12 @@ A substituicao deve preservar, conforme aplicavel:
 - Manter a composicao concreta das dependencias na borda da aplicacao.
 - Criar uma abstracao somente quando houver uma fronteira real de negocio ou uma dependencia com risco concreto de substituicao.
 
+## Ambiente de desenvolvimento local
+
+Postgres e Keycloak rodam via `docker-compose.yml` na raiz do repositorio, com volumes nomeados persistentes (dados sobrevivem a reinicios do container). Esta e uma decisao de **ambiente de desenvolvimento**, nao define a escolha final de hospedagem/producao.
+
+O realm do Keycloak e importado automaticamente na subida (`start-dev --import-realm`) a partir de `keycloak/import/`; o fluxo de configuracao e export do realm esta documentado em [keycloak/import/README.md](keycloak/import/README.md).
+
 ## Decisoes ainda em avaliacao
 
 - framework definitivo do frontend;
