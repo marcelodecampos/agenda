@@ -24,6 +24,7 @@ from agenda.application.criar_servico import CriarServico
 from agenda.application.registrar_atendimento_fidelidade import RegistrarAtendimentoFidelidade
 from agenda.application.registrar_progresso_fidelidade import RegistrarProgressoFidelidade
 from agenda.application.registrar_usuario import RegistrarUsuario
+from agenda.application.sincronizar_usuario_identidade import SincronizarUsuarioIdentidade
 from agenda.adapters.keycloak_identity_adapter import (
     IdentidadeNaoAutenticadaError,
     KeycloakIdentityAdapter,
@@ -590,7 +591,16 @@ def identidade_autenticada(
 
     token = credentials.credentials.strip()
     try:
-        return app.state.identity_adapter.obter_identidade(token)
+        identidade = app.state.identity_adapter.obter_identidade(token)
+        SincronizarUsuarioIdentidade(
+            UsuarioRepository(app.state.engine)
+        ).executar(identidade)
+        logger.info(
+            "identity_synchronized",
+            provider=identidade.provider,
+            subject=identidade.subject,
+        )
+        return identidade
     except IdentidadeNaoAutenticadaError as exc:
         logger.warning("authentication_rejected", reason=str(exc))
         raise HTTPException(
@@ -601,6 +611,9 @@ def identidade_autenticada(
     except ProvedorIdentidadeIndisponivelError as exc:
         logger.error("authentication_provider_unavailable", reason=str(exc))
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        logger.error("identity_synchronization_failed", reason=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def exigir_permissao(permissao: str):
