@@ -66,6 +66,22 @@ class Disponibilidade:
             if janela.dia_semana == data_consulta.weekday()
         )
 
+    def esta_disponivel(
+        self, data_consulta: date, inicio: time, fim: time
+    ) -> bool:
+        if inicio >= fim:
+            return False
+
+        intervalos = self.intervalos_para(data_consulta)
+        if not intervalos:
+            return False
+
+        solicitado = IntervaloHorario(inicio=inicio, fim=fim)
+        return any(
+            janela.inicio <= solicitado.inicio and solicitado.fim <= janela.fim
+            for janela in intervalos
+        )
+
     def _validar_sobreposicoes_semanais(self) -> None:
         por_dia: dict[int, list[IntervaloHorario]] = {}
         for janela in self.semanal:

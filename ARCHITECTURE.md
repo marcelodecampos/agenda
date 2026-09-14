@@ -53,6 +53,26 @@ Identidade externa -> Usuario interno -> Membership -> Organizacao e papeis
 
 O e-mail nao sera usado como identificador principal. A aplicacao usara um identificador interno proprio e armazenara o par `provider + subject` como referencia externa.
 
+### 3.1 Identificadores de login e unicidade do usuario
+
+Para o fluxo atual do produto, o CPF sera usado como `username` no Keycloak para novos usuarios. Isso resolve a colisao de nomes: duas pessoas podem se chamar Marcelo, mas nao podem compartilhar o mesmo CPF valido.
+
+Essa decisao nao transforma CPF em identificador interno. O identificador interno continua sendo um UUIDv7, e a referencia externa continua sendo `provider + subject` do Keycloak.
+
+O modelo `Usuario` da Agenda armazena, quando aplicavel, `cpf`, `email` e `telefone`. Cada um possui unicidade propria no banco quando informado. E-mail e telefone sao meios de contato e recuperacao, nao substituem `provider + subject`.
+
+Usuarios legados de desenvolvimento que ainda usam usernames textuais, como `marcelo` e `leila`, foram migrados para usernames baseados em CPF. Como o Keycloak nao permite alterar username, a migracao pode recriar a conta e alterar o `sub`; a Agenda deve executar reconciliacao controlada antes de associar a nova identidade ao usuario interno existente.
+
+O CPF e dado pessoal e a regra exige finalidade, controle de acesso, criptografia, retencao minima, auditoria e fluxo de correcao/exclusao conforme a LGPD.
+
+Entidades e contratos afetados por essa decisao:
+
+- `Usuario`: passa a armazenar CPF, e-mail e telefone opcionais;
+- `UsuarioModel`/tabela `usuarios`: novas colunas com unicidade individual;
+- `IdentidadeExterna` e adapter Keycloak: propagam `preferred_username`, `cpf`, `email` e `phone_number`;
+- `Cliente`: ja possuia CPF, e-mail e telefone; continua representando o perfil de cliente, enquanto `Usuario` representa a identidade autenticada;
+- `Membership`, `Organizacao`, `Servico` e `Agendamento`: nao precisam de CPF; continuam referenciando `Usuario` por UUIDv7 quando necessário.
+
 ### 4. Identificadores internos
 
 Novos identificadores internos usarao **UUIDv7**, preferencialmente no tipo nativo `uuid` do PostgreSQL.

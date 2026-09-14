@@ -10,6 +10,11 @@ from agenda.domain.agendamento import (
     StatusAgendamento,
     TransicaoStatus,
 )
+from agenda.domain.disponibilidade import (
+    Disponibilidade,
+    IntervaloHorario,
+    JanelaSemanal,
+)
 from agenda.domain.exceptions import (
     AgendamentoInvalidoError,
     TransicaoAgendamentoNaoPermitidaError,
@@ -92,5 +97,63 @@ def test_catalogo_rejeita_transicao_com_status_inexistente() -> None:
             status=(SOLICITADO,),
             transicoes=(
                 TransicaoStatus("solicitado", "confirmado", frozenset({"sistema"})),
+            ),
+        )
+
+
+def test_agendamento_so_pode_ser_criado_se_horario_estiver_disponivel() -> None:
+    disponibilidade = Disponibilidade(
+        id=novo_id(),
+        semanal=(
+            JanelaSemanal(
+                dia_semana=0,
+                intervalo=IntervaloHorario(__import__("datetime").time(9), __import__("datetime").time(17)),
+            ),
+        ),
+        profissional_id=novo_id(),
+    )
+
+    agendamento = Agendamento.criar(
+        id=novo_id(),
+        cliente_id=novo_id(),
+        profissional_id=novo_id(),
+        inicio=datetime(2026, 9, 14, 10, 0),
+        itens=(
+            ItemAgendamento(
+                servico_id=novo_id(),
+                duracao_minutos=60,
+                preco=Decimal("80"),
+            ),
+        ),
+        status_inicial="solicitado",
+        disponibilidade=disponibilidade,
+    )
+
+    assert agendamento.status_atual == "solicitado"
+
+    with pytest.raises(AgendamentoInvalidoError):
+        Agendamento.criar(
+            id=novo_id(),
+            cliente_id=novo_id(),
+            profissional_id=novo_id(),
+            inicio=datetime(2026, 9, 14, 8, 0),
+            itens=(
+                ItemAgendamento(
+                    servico_id=novo_id(),
+                    duracao_minutos=60,
+                    preco=Decimal("80"),
+                ),
+            ),
+            status_inicial="solicitado",
+            disponibilidade=disponibilidade,
+        )
+
+
+def test_catalogo_rejeita_transicao_para_o_mesmo_status() -> None:
+    with pytest.raises(AgendamentoInvalidoError):
+        CatalogoStatus(
+            status=(SOLICITADO,),
+            transicoes=(
+                TransicaoStatus("solicitado", "solicitado", frozenset({"profissional"})),
             ),
         )

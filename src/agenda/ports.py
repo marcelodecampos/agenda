@@ -45,6 +45,10 @@ class IdentidadeExterna:
     provider: str
     subject: str
     nome: str
+    username: str | None = None
+    cpf: str | None = None
+    email: str | None = None
+    telefone: str | None = None
 
 
 class IdentidadePort(Protocol):

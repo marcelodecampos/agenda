@@ -35,7 +35,7 @@ Plataforma para agendar serviços diversos, aproximando clientes de profissionai
   - **Deslocamento flexível por serviço**: cada serviço pode ser configurado como (a) cliente se desloca até o profissional/salão, (b) profissional se desloca até o cliente (atendimento domiciliar), ou ambos, dependendo do serviço/profissional.
   - Estimativa de custo de deslocamento: sem API pública de preço da Uber para terceiros; usar serviço de distância/tempo (Google Distance Matrix, OSRM/OpenStreetMap) + fórmula própria de custo (ex: R$/km + taxa fixa).
 
-- **LGPD e dados sensíveis**: a plataforma vai armazenar endereços e, futuramente, CPF. Compliance total com a LGPD é obrigatório desde o início (base legal de tratamento, consentimento explícito, minimização de dados, criptografia em repouso/trânsito, direito de exclusão/portabilidade).
+- **LGPD e dados pessoais**: a plataforma armazenará CPF para identificação/login, além de e-mail, telefone e endereços. Compliance total com a LGPD é obrigatório desde o início (base legal, transparência, minimização, criptografia, controle de acesso, auditoria e direitos de correção, exclusão e portabilidade).
 
 - **Visão de longo prazo — pagamento e repasse**: em um momento oportuno (fase futura, fora do MVP), a plataforma deve processar cobrança do cliente e repasse ao profissional (viabilizando a opção de comissão do modelo de receita híbrido e possivelmente cobrança de sinal/taxa de cancelamento).
 
@@ -66,7 +66,7 @@ Plataforma para agendar serviços diversos, aproximando clientes de profissionai
   - Relacionado ao item "Estatísticas e relatórios" / "Insights de desempenho" do roadmap, mas aplicado à ficha do cliente, não só à performance do profissional/estabelecimento.
 
 - **Campos do Cliente e LGPD (minimização de dados)**:
-  - **CPF do cliente: opcional no MVP**, não obrigatório no cadastro — sem pagamento/repasse pela plataforma ainda, não há finalidade concreta que justifique exigir esse dado (princípio da necessidade, Art. 6º da LGPD). Torna-se obrigatório apenas quando a funcionalidade de pagamento/repasse for implementada (finalidade clara: nota fiscal, split de pagamento).
+  - **CPF do usuário: username único no MVP** — novos usuários usarão o CPF normalizado com 11 dígitos como username no Keycloak. Nome pode se repetir. E-mail e telefone serão contatos únicos opcionais, com verificação quando disponíveis. O UUIDv7 interno e o par `provider + subject` continuam sendo os identificadores técnicos.
   - **CPF/CNPJ do profissional/estabelecimento**: pode ser exigido mais cedo, pois serve para identificação/verificação de quem está sendo cadastrado como parceiro na plataforma (mitigar fraude), independente de processar pagamento.
 
 - **Múltiplos serviços por agendamento**: **totalmente configurável**, sem limitação fixa. O profissional pode oferecer:
@@ -138,8 +138,9 @@ Consolidação de tudo que compõe a primeira entrega, resolvendo a pendência "
 - **Gestão básica do estabelecimento** (cadastro do estabelecimento, horários de funcionamento, convite/gestão de equipe via Membership): promovida do roadmap para o MVP porque é **pré-requisito direto** das permissões já fechadas (`estabelecimento.gerenciar_equipe`, `estabelecimento.configurar_dados`) — sem isso, Dono não tem como formar equipe nem o Membership N:N vira operável.
 - **Estatísticas básicas** (volume de agendamentos, taxa de no-show, ocupação da agenda): promovida do roadmap para o MVP em versão mínima, porque os dados já existem "de graça" a partir do ciclo de vida do agendamento (mesmo motivo da ficha do cliente) e agregam valor perceptível ao salão-piloto pagante a baixo custo de implementação. **Não inclui** "insights de desempenho" (análises comparativas/tendências), que permanece fora do MVP.
 - **Comissão de equipe** (revisado — ver nota abaixo): cálculo/relatório de quanto o estabelecimento deve pagar a cada Funcionário/Autônomo Associado, a partir de uma regra de comissão configurável (percentual ou valor fixo, por Membership e/ou por serviço) aplicada sobre os agendamentos concluídos. **Não envolve movimentação real de dinheiro pela plataforma** — o Dono continua pagando a equipe por fora, da mesma forma que o cliente paga o profissional diretamente. Promovida ao MVP porque não depende de pagamento passar pela plataforma (a dependência registrada originalmente só valia para o repasse automático via plataforma, não para o cálculo em si) e reaproveita dados já existentes (`Serviço.preço`, `Agendamento` concluído, `Membership`).
-- Autenticação via Keycloak (OIDC/OAuth2), sem senha própria armazenada.
-- Conformidade LGPD básica (minimização de dados, CPF do cliente opcional).
+- Autenticação via Keycloak (OIDC/OAuth2), sem senha própria armazenada; CPF é username de novos usuários.
+- E-mail e telefone como contatos únicos opcionais, com verificação no Keycloak quando disponíveis.
+- Conformidade LGPD básica com governança de CPF, e-mail, telefone e endereço.
 
 **Fora do MVP** (permanece no roadmap do produto, não descartado — ver seção seguinte): repasse automático de comissão pela plataforma (movimentação real de dinheiro), fluxo de receitas/financeiro completo, insights de desempenho avançados, mensagens em massa, agendamento via redes sociais, processamento de pagamento/repasse, apps nativos.
 
@@ -174,7 +175,7 @@ Itens que ampliam o escopo além do MVP fechado acima. Permanecem no roadmap do 
 ## Pontos ainda em aberto
 
 1. Consolidar modelo de negócio em resumo estruturado (opcional).
-2. Iniciar design técnico: modelagem de dados (profissional, estabelecimento, vínculo profissional-estabelecimento, serviço, agendamento, cliente), considerando a flexibilidade mista acima.
+2. Iniciar design técnico: modelagem de dados (usuário com CPF/e-mail/telefone, profissional, estabelecimento, vínculo profissional-estabelecimento, serviço, agendamento, cliente), considerando a flexibilidade mista acima.
 3. Definir stack/arquitetura do projeto (já é Python, `src/agenda`).
 4. ~~Definir MVP técnico mínimo para validar com o salão-piloto.~~ **Fechado** — ver seção "Escopo fechado do MVP".
 5. Escolher provedor de geocoding/distância (Google Maps Platform vs. OpenStreetMap/Nominatim + OSRM) considerando custo e cobertura no Brasil.

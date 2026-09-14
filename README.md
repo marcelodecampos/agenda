@@ -17,11 +17,29 @@ Copy-Item .env.example .env  # ajuste as senhas antes de subir
 docker compose up -d
 poetry install
 poetry run alembic upgrade head
-poetry run uvicorn agenda.main:app --reload
+poetry run python -m agenda.server
 ```
 
 - Postgres: `localhost:5432` (usuário/senha/banco definidos no `.env`).
 - Keycloak: `http://localhost:8080` (modo `start-dev`, adequado só para desenvolvimento).
 - Mailpit: `http://localhost:8025` para visualizar e-mails locais.
-- Health check: `http://localhost:8000/health`.
+- API local: `http://localhost:8081`.
+- API na rede: `http://<IP-da-maquina>:8081`.
+- Health check: `http://localhost:8081/health`.
 - Configuração do realm do Keycloak: ver [keycloak/import/README.md](keycloak/import/README.md).
+
+## Identidade e unicidade
+
+Para novos usuários, o CPF normalizado com 11 dígitos será o `username` único no Keycloak. O nome pode se repetir. E-mail e telefone são contatos únicos opcionais; o identificador técnico da Agenda continua sendo o UUIDv7 interno vinculado ao par `provider + subject` do Keycloak.
+
+CPF, e-mail, telefone e endereço são dados pessoais. Não coloque valores reais em arquivos versionados; use variáveis de ambiente e siga a política de LGPD registrada em [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Token local do Keycloak
+
+Existe uma rotina versionada em `local-tools/get_keycloak_token.py`. A senha não fica no código e é solicitada sem exibi-la:
+
+```powershell
+poetry run python local-tools/get_keycloak_token.py --username 59469390415
+```
+
+O access token é impresso na saída padrão. Para usar outro realm ou servidor, defina `KEYCLOAK_BASE_URL` e `KEYCLOAK_REALM` no ambiente.

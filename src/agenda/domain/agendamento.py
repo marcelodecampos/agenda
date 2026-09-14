@@ -1,8 +1,9 @@
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
+from agenda.domain.disponibilidade import Disponibilidade
 from agenda.domain.exceptions import (
     AgendamentoInvalidoError,
     TransicaoAgendamentoNaoPermitidaError,
@@ -74,6 +75,10 @@ class CatalogoStatus:
             raise AgendamentoInvalidoError(
                 "transicao precisa ter ao menos um ator permitido"
             )
+        if any(transicao.de == transicao.para for transicao in self.transicoes):
+            raise AgendamentoInvalidoError(
+                "transicao nao pode manter o mesmo status"
+            )
 
     def existe(self, chave: str) -> bool:
         return any(item.chave == chave for item in self.status)
@@ -117,6 +122,45 @@ class Agendamento:
                     ocorrido_em=self.inicio,
                 )
             )
+
+    @classmethod
+    def criar(
+        cls,
+        *,
+        id: uuid.UUID,
+        cliente_id: uuid.UUID,
+        profissional_id: uuid.UUID,
+        inicio: datetime,
+        itens: tuple[ItemAgendamento, ...],
+        status_inicial: str,
+        organizacao_id: uuid.UUID | None = None,
+        disponibilidade: Disponibilidade | None = None,
+    ) -> "Agendamento":
+        if not itens:
+            raise AgendamentoInvalidoError(
+                "agendamento precisa ter ao menos um item"
+            )
+
+        if disponibilidade is not None:
+            fim = inicio + timedelta(minutes=sum(item.duracao_minutos for item in itens))
+            if not disponibilidade.esta_disponivel(
+                inicio.date(),
+                inicio.time(),
+                fim.time(),
+            ):
+                raise AgendamentoInvalidoError(
+                    "horario solicitado nao esta disponivel para o profissional"
+                )
+
+        return cls(
+            id=id,
+            cliente_id=cliente_id,
+            profissional_id=profissional_id,
+            inicio=inicio,
+            itens=itens,
+            status_atual=status_inicial,
+            organizacao_id=organizacao_id,
+        )
 
     @property
     def duracao_total_minutos(self) -> int:

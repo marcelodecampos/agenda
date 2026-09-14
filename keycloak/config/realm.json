@@ -1,0 +1,98 @@
+{
+  "realm": "agenda",
+  "enabled": true,
+  "displayName": "Agenda",
+  "registrationAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "registrationEmailAsUsername": false,
+  "clients": [
+    {
+      "clientId": "agenda-api",
+      "name": "Agenda API",
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "cpf",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "cpf",
+            "claim.name": "cpf",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "phone_number",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "phone_number",
+            "claim.name": "phone_number",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "agenda-web",
+      "name": "Agenda Web",
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": [
+        "http://localhost:3000/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000"
+      ]
+    }
+  ],
+  "roles": [
+    {
+      "name": "platform_admin",
+      "description": "Acesso tecnico administrativo da plataforma"
+    }
+  ],
+  "users": [
+    {
+      "username": "59469390415",
+      "previousUsername": "marcelo",
+      "email": "sr.marcelo.campos@gmail.com",
+      "firstName": "Marcelo",
+      "lastName": "Campos",
+      "attributes": {
+        "cpf": ["59469390415"],
+        "phone_number": ["+5561984017586"]
+      },
+      "enabled": true,
+      "passwordEnv": "KEYCLOAK_MARCELO_PASSWORD",
+      "roles": ["platform_admin"]
+    },
+    {
+      "username": "49025066291",
+      "previousUsername": "leila",
+      "email": "leilatneves@gmail.com",
+      "firstName": "Leila",
+      "lastName": "Neves",
+      "attributes": {
+        "cpf": ["49025066291"],
+        "phone_number": ["+5561992261327"]
+      },
+      "enabled": true,
+      "passwordEnv": "KEYCLOAK_LEILA_PASSWORD",
+      "roles": ["platform_admin"]
+    }
+  ]
+}

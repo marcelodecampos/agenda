@@ -86,3 +86,36 @@ def test_rejeita_excecoes_duplicadas_na_mesma_data() -> None:
 def test_rejeita_disponibilidade_sem_proprietario() -> None:
     with pytest.raises(DisponibilidadeInvalidaError):
         Disponibilidade(id=novo_id())
+
+
+def test_disponibilidade_confere_se_intervalo_esta_dentro_da_janela() -> None:
+    disponibilidade = Disponibilidade(
+        id=novo_id(),
+        semanal=(
+            JanelaSemanal(
+                dia_semana=0,
+                intervalo=IntervaloHorario(time(9), time(17)),
+            ),
+        ),
+        profissional_id=novo_id(),
+    )
+
+    assert disponibilidade.esta_disponivel(date(2026, 9, 14), time(10), time(11)) is True
+    assert disponibilidade.esta_disponivel(date(2026, 9, 14), time(8), time(9)) is False
+    assert disponibilidade.esta_disponivel(date(2026, 9, 14), time(16), time(18)) is False
+
+
+def test_disponibilidade_em_excecao_com_folga_nao_aceita_agendamento() -> None:
+    disponibilidade = Disponibilidade(
+        id=novo_id(),
+        semanal=(
+            JanelaSemanal(
+                dia_semana=0,
+                intervalo=IntervaloHorario(time(9), time(17)),
+            ),
+        ),
+        excecoes=(ExcecaoAgenda(data=date(2026, 9, 14)),),
+        profissional_id=novo_id(),
+    )
+
+    assert disponibilidade.esta_disponivel(date(2026, 9, 14), time(10), time(11)) is False
