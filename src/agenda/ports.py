@@ -17,6 +17,10 @@ class NotificacaoAgendamento:
     destinatario: DestinatarioNotificacao
     mensagem: str
     enviar_em: datetime
+    status: str = "pendente"
+    tentativas: int = 0
+    erro: str | None = None
+    enviado_em: datetime | None = None
 
 
 class NotificacaoPort(Protocol):

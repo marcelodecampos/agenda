@@ -268,6 +268,185 @@ def test_criar_organizacao_endpoint() -> None:
     assert payload["endereco"]["cidade"] == "São Paulo"
 
 
+def test_criar_profissional_independente_endpoint_usa_papel_do_catalogo() -> None:
+    from agenda.domain.papel import Papel
+    from agenda.domain.usuario import Usuario
+    from agenda.infrastructure.membership_repository import (
+        MembershipRepository,
+        PapelRepository,
+    )
+    from agenda.infrastructure.usuario_repository import UsuarioRepository
+
+    engine = criar_engine_sqlite_memoria()
+    app.state.engine = engine
+    usuario = Usuario(
+        id=uuid.uuid7(),
+        provider="keycloak",
+        subject="profissional-1",
+        nome="Ana Silva",
+    )
+    UsuarioRepository(engine).salvar(usuario)
+    PapelRepository(engine).salvar(
+        Papel(
+            id=uuid.uuid7(),
+            chave="dono",
+            nome="Dono",
+            permissoes=frozenset({"estabelecimento.configurar_dados"}),
+        )
+    )
+
+    identidade_anterior = app.dependency_overrides[identidade_autenticada]
+    app.dependency_overrides[identidade_autenticada] = lambda: IdentidadeExterna(
+        provider="keycloak",
+        subject="profissional-1",
+        nome="Ana Silva",
+    )
+    try:
+        response = client.post(
+            "/profissionais/independente",
+            json={
+                "nome": "Ana Estetica",
+                "endereco": {
+                    "logradouro": "Rua A",
+                    "numero": "10",
+                    "cidade": "Sao Paulo",
+                    "estado": "SP",
+                    "cep": "01000-000",
+                },
+            },
+        )
+    finally:
+        app.dependency_overrides[identidade_autenticada] = identidade_anterior
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["organizacao"]["unipessoal"] is True
+    assert payload["organizacao"]["nome"] == "Ana Estetica"
+    assert payload["membership"]["usuario_id"] == str(usuario.id)
+    assert payload["membership"]["organizacao_id"] == payload["organizacao"]["id"]
+    assert payload["membership"]["papeis"][0]["chave"] == "dono"
+    assert MembershipRepository(engine).listar_por_usuario_id(usuario.id)
+
+
+def test_criar_membership_usa_permissoes_do_catalogo() -> None:
+    from agenda.domain.membership import Membership
+    from agenda.domain.papel import Papel
+    from agenda.domain.usuario import Usuario
+    from agenda.infrastructure.membership_repository import MembershipRepository, PapelRepository
+    from agenda.infrastructure.usuario_repository import UsuarioRepository
+
+    engine = criar_engine_sqlite_memoria()
+    app.state.engine = engine
+    organizacao_id = uuid.uuid7()
+    usuario = Usuario(
+        id=uuid.uuid7(),
+        provider="keycloak",
+        subject="membro-1",
+        nome="Joao Silva",
+    )
+    UsuarioRepository(engine).salvar(usuario)
+    PapelRepository(engine).salvar(
+        Papel(
+            id=uuid.uuid7(),
+            chave="funcionario",
+            nome="Funcionario",
+            permissoes=frozenset({"agenda.visualizar"}),
+        )
+    )
+    MembershipRepository(engine).salvar(
+        Membership(
+            id=uuid.uuid7(),
+            usuario_id=usuario.id,
+            organizacao_id=organizacao_id,
+            papeis=[
+                Papel(
+                    id=uuid.uuid7(),
+                    chave="dono",
+                    nome="Dono",
+                    permissoes=frozenset({"estabelecimento.gerenciar_equipe"}),
+                )
+            ],
+        )
+    )
+    identidade_anterior = app.dependency_overrides[exigir_gerenciar_equipe]
+    app.dependency_overrides[exigir_gerenciar_equipe] = lambda: IdentidadeExterna(
+        provider="keycloak", subject="membro-1", nome="Joao Silva"
+    )
+
+    try:
+        response = client.post(
+            "/memberships",
+            json={
+                "usuario_id": str(usuario.id),
+                "organizacao_id": str(organizacao_id),
+                "papeis": ["funcionario"],
+            },
+        )
+    finally:
+        app.dependency_overrides[exigir_gerenciar_equipe] = identidade_anterior
+
+    assert response.status_code == 200
+    assert response.json()["papeis"][0]["chave"] == "funcionario"
+    assert response.json()["papeis"][0]["permissoes"] == ["agenda.visualizar"]
+
+
+def test_criar_membership_rejeita_papel_fora_do_catalogo() -> None:
+    from agenda.domain.membership import Membership
+    from agenda.domain.papel import Papel
+    from agenda.domain.usuario import Usuario
+    from agenda.infrastructure.membership_repository import MembershipRepository
+    from agenda.infrastructure.usuario_repository import UsuarioRepository
+
+    engine = criar_engine_sqlite_memoria()
+    app.state.engine = engine
+    usuario_id = uuid.uuid7()
+    organizacao_id = uuid.uuid7()
+    UsuarioRepository(engine).salvar(
+        Usuario(
+            id=usuario_id,
+            provider="keycloak",
+            subject="membro-invalido",
+            nome="Joao Silva",
+        )
+    )
+    MembershipRepository(engine).salvar(
+        Membership(
+            id=uuid.uuid7(),
+            usuario_id=usuario_id,
+            organizacao_id=organizacao_id,
+            papeis=[
+                Papel(
+                    id=uuid.uuid7(),
+                    chave="dono",
+                    nome="Dono",
+                    permissoes=frozenset({"estabelecimento.gerenciar_equipe"}),
+                )
+            ],
+        )
+    )
+    identidade_anterior = app.dependency_overrides[exigir_gerenciar_equipe]
+    app.dependency_overrides[exigir_gerenciar_equipe] = lambda: IdentidadeExterna(
+        provider="keycloak", subject="membro-invalido", nome="Joao Silva"
+    )
+
+    try:
+        response = client.post(
+            "/memberships",
+            json={
+                "usuario_id": str(usuario_id),
+                "organizacao_id": str(organizacao_id),
+                "papeis": ["papel_inventado"],
+            },
+        )
+    finally:
+        app.dependency_overrides[exigir_gerenciar_equipe] = identidade_anterior
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "papel nao encontrado no catalogo: papel_inventado"
+    )
+
+
 def test_criar_servico_endpoint() -> None:
     app.state.engine = criar_engine_sqlite_memoria()
 
@@ -295,6 +474,155 @@ def test_criar_servico_endpoint() -> None:
     assert payload["nome"] == "Manicure"
     assert payload["categoria"] == "unhas"
     assert payload["modalidades"][0]["chave"] == "domicilio"
+
+
+def test_criar_servico_independente_exige_profissional_ou_organizacao() -> None:
+    response = client.post(
+        "/servicos",
+        json={
+            "nome": "Servico sem ofertante",
+            "categoria": "beleza",
+            "duracao_base_minutos": 30,
+            "preco_base": "50.00",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "servico precisa pertencer" in str(response.json()["detail"])
+
+
+def test_criar_disponibilidade_exige_profissional_ou_organizacao() -> None:
+    response = client.post(
+        "/disponibilidades",
+        json={
+            "semanal": [
+                {
+                    "dia_semana": 1,
+                    "intervalo": {"inicio": "09:00:00", "fim": "18:00:00"},
+                }
+            ],
+            "excecoes": [],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "disponibilidade precisa pertencer" in str(response.json()["detail"])
+
+
+def test_criar_agendamento_rejeita_item_sem_servico_ou_pacote() -> None:
+    response = client.post(
+        "/agendamentos",
+        json={
+            "cliente_id": str(uuid.uuid7()),
+            "profissional_id": str(uuid.uuid7()),
+            "inicio": "2026-09-20T14:00:00-03:00",
+            "itens": [
+                {"duracao_minutos": 60, "preco": "100.00"},
+            ],
+            "status_atual": "solicitado",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "item deve referenciar exatamente" in str(response.json()["detail"])
+
+
+def test_consultar_horarios_livres_endpoint_remove_agendamento_ocupado() -> None:
+    from datetime import datetime, time
+    from decimal import Decimal
+
+    from agenda.domain.agendamento import Agendamento, ItemAgendamento
+    from agenda.domain.disponibilidade import (
+        Disponibilidade,
+        IntervaloHorario,
+        JanelaSemanal,
+    )
+    from agenda.infrastructure.agendamento_repository import AgendamentoRepository
+    from agenda.infrastructure.disponibilidade_repository import DisponibilidadeRepository
+
+    engine = criar_engine_sqlite_memoria()
+    app.state.engine = engine
+    profissional_id = uuid.uuid7()
+    DisponibilidadeRepository(engine).salvar(
+        Disponibilidade(
+            id=uuid.uuid7(),
+            semanal=(
+                JanelaSemanal(
+                    dia_semana=0,
+                    intervalo=IntervaloHorario(time(9), time(12)),
+                ),
+            ),
+            profissional_id=profissional_id,
+        )
+    )
+    AgendamentoRepository(engine).salvar(
+        Agendamento(
+            id=uuid.uuid7(),
+            cliente_id=uuid.uuid7(),
+            profissional_id=profissional_id,
+            inicio=datetime(2026, 9, 14, 10),
+            itens=(
+                ItemAgendamento(
+                    servico_id=uuid.uuid7(),
+                    duracao_minutos=60,
+                    preco=Decimal("80"),
+                ),
+            ),
+            status_atual="solicitado",
+        )
+    )
+
+    response = client.get(
+        "/horarios-livres",
+        params={
+            "profissional_id": str(profissional_id),
+            "data": "2026-09-14",
+            "duracao_minutos": 60,
+            "passo_minutos": 60,
+        },
+    )
+
+    assert response.status_code == 200
+    assert [slot["inicio"][11:16] for slot in response.json()] == [
+        "09:00",
+        "11:00",
+    ]
+
+
+def test_transicionar_agendamento_usa_catalogo_persistido() -> None:
+    from datetime import datetime
+    from decimal import Decimal
+
+    from agenda.domain.agendamento import Agendamento, ItemAgendamento
+    from agenda.infrastructure.agendamento_repository import AgendamentoRepository
+    from agenda.infrastructure.status_agendamento_repository import CatalogoStatusRepository
+    from agenda.domain.agendamento import CatalogoStatus, StatusAgendamento, TransicaoStatus
+
+    engine = criar_engine_sqlite_memoria()
+    app.state.engine = engine
+    agendamento = Agendamento(
+        id=uuid.uuid7(),
+        cliente_id=uuid.uuid7(),
+        profissional_id=uuid.uuid7(),
+        inicio=datetime(2026, 9, 14, 10),
+        itens=(ItemAgendamento(servico_id=uuid.uuid7(), duracao_minutos=30, preco=Decimal("40")),),
+        status_atual="solicitado",
+    )
+    AgendamentoRepository(engine).salvar(agendamento)
+    CatalogoStatusRepository(engine).salvar(
+        CatalogoStatus(
+            status=(StatusAgendamento("solicitado", "Solicitado"), StatusAgendamento("confirmado", "Confirmado")),
+            transicoes=(TransicaoStatus("solicitado", "confirmado", frozenset({"profissional"})),),
+        )
+    )
+
+    response = client.post(
+        f"/agendamentos/{agendamento.id}/transicoes",
+        json={"novo_status": "confirmado", "ator": "profissional"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status_atual"] == "confirmado"
 
 
 def test_listar_e_buscar_usuarios_endpoints() -> None:

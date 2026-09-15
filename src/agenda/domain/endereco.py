@@ -35,6 +35,8 @@ class Endereco:
 class Cliente:
     id: uuid.UUID
     nome: str
+    usuario_id: uuid.UUID | None = None
+    segmento: str | None = None
     telefone: str | None = None
     email: str | None = None
     cpf: str | None = None

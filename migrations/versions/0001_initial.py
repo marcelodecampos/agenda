@@ -7,6 +7,7 @@ from alembic import op
 from agenda.infrastructure.db import Base
 from agenda.infrastructure import (  # noqa: F401
     agendamento_repository,
+    cliente_repository,
     disponibilidade_repository,
     fidelidade_repository,
     membership_repository,

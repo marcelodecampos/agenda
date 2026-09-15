@@ -114,6 +114,19 @@ class ProgressoFidelidadeModel(Base):
         )
 
 
+class ResgateFidelidadeModel(Base):
+    __tablename__ = "resgates_fidelidade"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    programa_id: Mapped[str] = mapped_column(String, nullable=False)
+    cliente_id: Mapped[str] = mapped_column(String, nullable=False)
+    agendamento_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    preco_original: Mapped[str] = mapped_column(String, nullable=False)
+    desconto: Mapped[str] = mapped_column(String, nullable=False)
+    preco_final: Mapped[str] = mapped_column(String, nullable=False)
+    gratuito: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+
 class ProgramaFidelidadeRepository:
     def __init__(self, engine: object) -> None:
         self.engine = engine
@@ -196,3 +209,25 @@ class ProgressoFidelidadeRepository:
                 )
             ).scalar_one_or_none()
             return row.to_domain() if row else None
+
+
+class ResgateFidelidadeRepository:
+    def __init__(self, engine: object) -> None:
+        self.engine = engine
+        Base.metadata.create_all(bind=engine)
+
+    def salvar(self, *, programa_id: uuid.UUID, cliente_id: uuid.UUID, aplicacao: object, agendamento_id: uuid.UUID | None = None) -> uuid.UUID:
+        resgate_id = uuid.uuid7()
+        with criar_session(self.engine) as session:
+            session.add(ResgateFidelidadeModel(
+                id=str(resgate_id),
+                programa_id=str(programa_id),
+                cliente_id=str(cliente_id),
+                agendamento_id=str(agendamento_id) if agendamento_id else None,
+                preco_original=str(aplicacao.preco_original),
+                desconto=str(aplicacao.desconto),
+                preco_final=str(aplicacao.preco_final),
+                gratuito=aplicacao.gratuito,
+            ))
+            session.commit()
+        return resgate_id

@@ -24,6 +24,9 @@ poetry run python -m agenda.server
 - Keycloak: `http://localhost:8080` (modo `start-dev`, adequado só para desenvolvimento).
 - Mailpit: `http://localhost:8025` para visualizar e-mails locais.
 - API local: `http://localhost:8081`.
+- Descoberta pública: `GET /descoberta?categoria=unhas` ou com `endereco` e `raio_km`.
+- Processamento de notificações vencidas: `POST /notificacoes/processar-vencidas`, com `NOTIFICACAO_WEBHOOK_URL` configurada.
+- Worker de notificações em execução única: `poetry run python -m agenda.worker`.
 - API na rede: `http://<IP-da-maquina>:8081`.
 - Health check: `http://localhost:8081/health`.
 - Configuração do realm do Keycloak: ver [keycloak/import/README.md](keycloak/import/README.md).

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import String, select
+from sqlalchemy import String, UniqueConstraint, select
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agenda.domain.membership import Membership
@@ -12,6 +12,7 @@ from agenda.infrastructure.db import Base, criar_session
 
 class PapelModel(Base):
     __tablename__ = "papeis"
+    __table_args__ = (UniqueConstraint("chave", name="uq_papeis_chave"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chave: Mapped[str] = mapped_column(String, nullable=False)
@@ -34,6 +35,30 @@ class PapelModel(Base):
             nome=self.nome,
             permissoes=frozenset(filter(None, self.permissoes.split("|"))),
         )
+
+
+class PapelRepository:
+    def __init__(self, engine: object) -> None:
+        self.engine = engine
+        Base.metadata.create_all(bind=engine)
+
+    def salvar(self, papel: Papel) -> Papel:
+        with criar_session(self.engine) as session:
+            session.add(PapelModel.from_domain(papel))
+            session.commit()
+        return papel
+
+    def listar(self) -> list[Papel]:
+        with criar_session(self.engine) as session:
+            rows = session.execute(select(PapelModel)).scalars().all()
+            return [row.to_domain() for row in rows]
+
+    def buscar_por_chave(self, chave: str) -> Papel | None:
+        with criar_session(self.engine) as session:
+            row = session.execute(
+                select(PapelModel).where(PapelModel.chave == chave)
+            ).scalar_one_or_none()
+            return row.to_domain() if row else None
 
 
 class MembershipModel(Base):
