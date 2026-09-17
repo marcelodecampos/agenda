@@ -117,6 +117,14 @@ O Docker Compose sera utilizado para desenvolvimento local e para apoiar testes 
 
 O backend HTTP do MVP usara FastAPI, com Uvicorn como servidor ASGI. A camada HTTP permanecera na borda da aplicacao e nao sera acessada diretamente pelo dominio.
 
+### 8. Framework do frontend
+
+O frontend web do MVP usara Next.js, React e TypeScript. O Next.js sera responsavel pela experiencia web responsiva e pela base PWA, enquanto o FastAPI permanecera como backend e proprietario das regras de negocio.
+
+O frontend consumira a API do FastAPI por contratos HTTP versionaveis. Regras de negocio nao devem ser duplicadas no Next.js, e as rotas de API do Next.js nao serao usadas como substitutas da camada de aplicacao do backend.
+
+Essa escolha atende ao MVP exclusivamente web, favorece SEO e carregamento inicial nas paginas publicas de descoberta e mantem aberta uma futura evolucao para aplicativos baseados no ecossistema React. A escolha nao implica compartilhamento obrigatorio de componentes entre o site e futuros aplicativos nativos.
+
 ## Regras de implementacao
 
 - Nao importar bibliotecas de infraestrutura no dominio.
@@ -137,7 +145,6 @@ O realm do Keycloak e importado automaticamente na subida (`start-dev --import-r
 
 ## Decisoes ainda em avaliacao
 
-- framework definitivo do frontend;
 - escolha final de hospedagem;
 - PostgreSQL/PostGIS como banco de producao;
 - mecanismo de filas para tarefas assincronas;
