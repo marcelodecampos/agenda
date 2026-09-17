@@ -44,6 +44,22 @@ class DistanciaPort(Protocol):
         """Estima distancia entre pontos para descoberta ou deslocamento."""
 
 
+class ArmazenamentoBinarioPort(Protocol):
+    """Capacidade de guardar/servir arquivos binarios, independente do provedor
+    (disco local hoje; Azure Blob, S3 ou GCS no futuro). A chave e opaca para quem
+    chama: cada adapter decide seu proprio esquema de armazenamento."""
+
+    def salvar(self, *, chave: str, conteudo: bytes, mime_type: str) -> None:
+        """Grava o conteudo sob a chave informada. Idempotente: gravar a mesma
+        chave duas vezes com o mesmo conteudo nao deve falhar nem duplicar."""
+
+    def obter_url(self, chave: str) -> str:
+        """Retorna uma URL para obter o conteudo (local, assinada/temporaria, etc.)."""
+
+    def remover(self, chave: str) -> None:
+        """Remove o conteudo referenciado pela chave, se existir."""
+
+
 @dataclass(frozen=True)
 class IdentidadeExterna:
     provider: str

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
 
 
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 BASE_URL = os.getenv("KEYCLOAK_BASE_URL", "http://localhost:8080").rstrip("/")
 ADMIN_USERNAME = os.getenv("KEYCLOAK_ADMIN", "admin")
 ADMIN_PASSWORD = os.getenv("KEYCLOAK_ADMIN_PASSWORD", "changeme")

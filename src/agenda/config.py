@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+psycopg://agenda:agenda@localhost:5432/agenda"
     )
+    media_storage_provider: str = "filesystem"
+    media_storage_path: str = "./data/media"
+    media_base_url: str = "http://localhost:8081"
 
     model_config = SettingsConfigDict(
         env_file=".env",

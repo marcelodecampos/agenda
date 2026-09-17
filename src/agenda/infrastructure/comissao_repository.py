@@ -19,6 +19,16 @@ class RegraComissaoModel(Base):
     membership_id: Mapped[str | None] = mapped_column(String, nullable=True)
     servico_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    @classmethod
+    def from_domain(cls, regra: RegraComissao) -> "RegraComissaoModel":
+        return cls(
+            id=str(regra.id),
+            tipo=regra.tipo,
+            valor=str(regra.valor),
+            membership_id=str(regra.membership_id) if regra.membership_id else None,
+            servico_id=str(regra.servico_id) if regra.servico_id else None,
+        )
+
     def to_domain(self) -> RegraComissao:
         return RegraComissao(
             id=uuid.UUID(self.id),
@@ -36,17 +46,22 @@ class RegraComissaoRepository:
 
     def salvar(self, regra: RegraComissao) -> RegraComissao:
         with criar_session(self.engine) as session:
-            session.merge(
-                RegraComissaoModel(
-                    id=str(regra.id),
-                    tipo=regra.tipo,
-                    valor=str(regra.valor),
-                    membership_id=str(regra.membership_id) if regra.membership_id else None,
-                    servico_id=str(regra.servico_id) if regra.servico_id else None,
-                )
-            )
+            session.merge(RegraComissaoModel.from_domain(regra))
             session.commit()
         return regra
+
+    def atualizar(self, regra: RegraComissao) -> RegraComissao:
+        with criar_session(self.engine) as session:
+            session.merge(RegraComissaoModel.from_domain(regra))
+            session.commit()
+        return regra
+
+    def buscar_por_id(self, id_: uuid.UUID) -> RegraComissao | None:
+        with criar_session(self.engine) as session:
+            row = session.execute(
+                select(RegraComissaoModel).where(RegraComissaoModel.id == str(id_))
+            ).scalar_one_or_none()
+            return row.to_domain() if row else None
 
     def listar(self) -> list[RegraComissao]:
         with criar_session(self.engine) as session:

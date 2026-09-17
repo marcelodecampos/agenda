@@ -42,6 +42,7 @@ class Servico:
     preco_base: Decimal
     profissional_id: uuid.UUID | None = None
     organizacao_id: uuid.UUID | None = None
+    tipo_procedimento_id: uuid.UUID | None = None
     modalidades: tuple[ModalidadeAtendimento, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:

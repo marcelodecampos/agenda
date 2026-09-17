@@ -119,6 +119,15 @@ class NotificacaoAgendamentoRepository:
             ).scalar_one()
             return row.to_domain(destinatario.to_domain())
 
+    def listar(self) -> list[NotificacaoAgendamento]:
+        with criar_session(self.engine) as session:
+            rows = session.execute(select(NotificacaoAgendamentoModel)).scalars().all()
+            destinatarios = {
+                item.id: item.to_domain()
+                for item in session.execute(select(DestinatarioNotificacaoModel)).scalars().all()
+            }
+            return [row.to_domain(destinatarios[row.destinatario_id]) for row in rows]
+
     def listar_pendentes_vencidas(self, agora: datetime) -> list[NotificacaoAgendamento]:
         with criar_session(self.engine) as session:
             rows = session.execute(

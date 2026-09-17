@@ -8,8 +8,9 @@ from time import monotonic
 
 import structlog
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agenda.application.calcular_comissao_agendamento import CalcularComissaoAgendamento
@@ -38,6 +39,9 @@ from agenda.application.resgatar_fidelidade import ResgatarFidelidade
 from agenda.application.registrar_progresso_fidelidade import RegistrarProgressoFidelidade
 from agenda.application.registrar_usuario import RegistrarUsuario
 from agenda.application.sincronizar_usuario_identidade import SincronizarUsuarioIdentidade
+from agenda.application.criar_organizacao_com_equipe import CriarOrganizacaoComEquipe
+from agenda.application.enviar_media import EnviarMedia
+from agenda.application.anexar_media import AnexarMedia
 from agenda.adapters.keycloak_identity_adapter import (
     IdentidadeNaoAutenticadaError,
     KeycloakIdentityAdapter,
@@ -46,9 +50,16 @@ from agenda.adapters.keycloak_identity_adapter import (
 from agenda.adapters.nominatim_geocodificacao_adapter import NominatimGeocodificacaoAdapter
 from agenda.adapters.osrm_distancia_adapter import OSRMDistanciaAdapter
 from agenda.adapters.webhook_notificacao_adapter import WebhookNotificacaoAdapter
+from agenda.adapters.filesystem_storage_adapter import FilesystemStorageAdapter
 from agenda.application.processar_notificacoes import ProcessarNotificacoesVencidas
 from agenda.config import settings
-from agenda.domain.agendamento import Agendamento, ItemAgendamento
+from agenda.domain.agendamento import (
+    Agendamento,
+    CatalogoStatus,
+    ItemAgendamento,
+    StatusAgendamento,
+    TransicaoStatus,
+)
 from agenda.domain.comissao import RegraComissao
 from agenda.domain.disponibilidade import Disponibilidade, ExcecaoAgenda, IntervaloHorario, JanelaSemanal
 from agenda.domain.endereco import Endereco
@@ -71,6 +82,8 @@ from agenda.domain.organizacao import Organizacao
 from agenda.domain.pacote import Pacote
 from agenda.domain.papel import Papel
 from agenda.domain.servico import ModalidadeAtendimento, Servico
+from agenda.domain.tipo_procedimento import TipoProcedimento
+from agenda.domain.media import AnexoMedia, Media
 from agenda.domain.usuario import Usuario
 from agenda.infrastructure.agendamento_repository import AgendamentoRepository
 from agenda.infrastructure.cliente_repository import ClienteRepository
@@ -88,6 +101,8 @@ from agenda.infrastructure.organizacao_repository import OrganizacaoRepository
 from agenda.infrastructure.pacote_repository import PacoteRepository
 from agenda.infrastructure.servico_repository import ServicoRepository
 from agenda.infrastructure.status_agendamento_repository import CatalogoStatusRepository
+from agenda.infrastructure.tipo_procedimento_repository import TipoProcedimentoRepository
+from agenda.infrastructure.media_repository import AnexoMediaRepository, MediaRepository
 from agenda.infrastructure.usuario_repository import UsuarioRepository
 from agenda.logging import configure_logging
 from agenda.ports import DestinatarioNotificacao
@@ -125,6 +140,8 @@ app = FastAPI(
         {"name": "Fidelidade", "description": "Programas de fidelidade e acompanhamento de progresso."},
         {"name": "Notificações", "description": "Geração de lembretes e notificações de agendamento."},
         {"name": "Comissão", "description": "Cálculo de comissão com base em regras e status do agendamento."},
+        {"name": "Catálogos", "description": "Catálogos administráveis: papéis, status de agendamento e tipos de procedimento."},
+        {"name": "Mídia", "description": "Upload e associação de arquivos binários (fotos, vídeos, documentos) a qualquer entidade."},
     ],
 )
 if not hasattr(app.state, "engine"):
@@ -134,6 +151,16 @@ if not hasattr(app.state, "identity_adapter"):
         base_url=settings.keycloak_base_url,
         realm=settings.keycloak_realm,
     )
+if not hasattr(app.state, "armazenamento"):
+    app.state.armazenamento = FilesystemStorageAdapter(
+        raiz=settings.media_storage_path,
+        base_url=settings.media_base_url,
+    )
+app.mount(
+    "/media/arquivos",
+    StaticFiles(directory=settings.media_storage_path),
+    name="media_arquivos",
+)
 
 
 class PublicRateLimiter:
@@ -332,6 +359,7 @@ class ServicoInput(BaseModel):
     preco_base: Decimal = Field(..., ge=0)
     profissional_id: str | None = None
     organizacao_id: str | None = None
+    tipo_procedimento_id: str | None = None
     modalidades: list[ModalidadeInput] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -351,6 +379,7 @@ class ServicoOutput(BaseModel):
     preco_base: Decimal
     profissional_id: str | None = None
     organizacao_id: str | None = None
+    tipo_procedimento_id: str | None = None
     modalidades: list[ModalidadeOutput] = Field(default_factory=list)
 
 
@@ -639,6 +668,17 @@ class ResgateFidelidadeOutput(BaseModel):
     atendimentos_restantes: int
 
 
+class ResgateFidelidadeRegistroOutput(BaseModel):
+    resgate_id: str
+    programa_id: str
+    cliente_id: str
+    agendamento_id: str | None = None
+    preco_original: Decimal
+    desconto: Decimal
+    preco_final: Decimal
+    gratuito: bool
+
+
 class DestinatarioNotificacaoInput(BaseModel):
     id: str = Field(..., min_length=1)
     canal: str = Field(..., min_length=1)
@@ -685,6 +725,17 @@ class LembreteOutput(BaseModel):
     enviar_em: datetime
 
 
+class NotificacaoOutput(BaseModel):
+    agendamento_id: str
+    destinatario: DestinatarioNotificacaoInput
+    mensagem: str
+    enviar_em: datetime
+    status: str
+    tentativas: int
+    erro: str | None = None
+    enviado_em: datetime | None = None
+
+
 class RegraComissaoInput(BaseModel):
     id: str
     tipo: str
@@ -699,6 +750,65 @@ class RegraComissaoOutput(BaseModel):
     valor: Decimal
     membership_id: str | None = None
     servico_id: str | None = None
+
+
+class StatusAgendamentoInput(BaseModel):
+    chave: str = Field(..., min_length=1)
+    nome: str = Field(..., min_length=1)
+
+
+class TransicaoStatusInput(BaseModel):
+    de: str = Field(..., min_length=1)
+    para: str = Field(..., min_length=1)
+    atores: list[str] = Field(default_factory=list)
+
+
+class CatalogoStatusInput(BaseModel):
+    status: list[StatusAgendamentoInput] = Field(default_factory=list)
+    transicoes: list[TransicaoStatusInput] = Field(default_factory=list)
+
+
+class CatalogoStatusOutput(BaseModel):
+    status: list[StatusAgendamentoInput]
+    transicoes: list[TransicaoStatusInput]
+
+
+class TipoProcedimentoInput(BaseModel):
+    chave: str = Field(..., min_length=1)
+    nome: str = Field(..., min_length=1)
+
+
+class TipoProcedimentoOutput(BaseModel):
+    id: str
+    chave: str
+    nome: str
+
+
+class MediaOutput(BaseModel):
+    id: str
+    sha256: str
+    mime_type: str
+    tamanho_bytes: int
+    nome_original: str | None = None
+    url: str
+    reaproveitada: bool = False
+
+
+class AnexoMediaInput(BaseModel):
+    media_id: str
+    entidade_tipo: str = Field(..., min_length=1)
+    entidade_id: str
+    papel: str = Field(..., min_length=1)
+    ordem: int = 0
+
+
+class AnexoMediaOutput(BaseModel):
+    id: str
+    entidade_tipo: str
+    entidade_id: str
+    papel: str
+    ordem: int
+    media: MediaOutput
 
 
 class ComissaoInput(BaseModel):
@@ -897,6 +1007,7 @@ exigir_configurar_agenda = exigir_permissao("agenda.configurar")
 exigir_solicitar_agendamento = exigir_permissao("agendamento.solicitar")
 exigir_configurar_fidelidade = exigir_permissao("fidelidade.configurar_programa")
 exigir_configurar_comissao = exigir_permissao("comissao.configurar_regra")
+exigir_gerenciar_catalogos = exigir_permissao("plataforma.gerenciar_catalogos")
 
 
 @app.get(
@@ -1026,6 +1137,9 @@ def servico_para_output(servico: Servico) -> ServicoOutput:
         preco_base=servico.preco_base,
         profissional_id=str(servico.profissional_id) if servico.profissional_id else None,
         organizacao_id=str(servico.organizacao_id) if servico.organizacao_id else None,
+        tipo_procedimento_id=(
+            str(servico.tipo_procedimento_id) if servico.tipo_procedimento_id else None
+        ),
         modalidades=[
             ModalidadeOutput(
                 chave=item.chave,
@@ -1417,6 +1531,9 @@ def atualizar_servico_endpoint(
         preco_base=payload.preco_base,
         profissional_id=profissional_id,
         organizacao_id=organizacao_id,
+        tipo_procedimento_id=(
+            uuid.UUID(payload.tipo_procedimento_id) if payload.tipo_procedimento_id else None
+        ),
         modalidades=tuple(
             ModalidadeAtendimento(
                 chave=item.chave,
@@ -1494,6 +1611,34 @@ def criar_cliente_endpoint(
         endereco=endereco,
     )
     return cliente_para_output(ClienteRepository(app.state.engine).salvar(cliente))
+
+
+@app.get(
+    "/clientes",
+    response_model=list[ClienteOutput],
+    tags=["Usuários"],
+    summary="Lista fichas de cliente",
+    description=(
+        "Retorna todas as fichas de cliente para quem tem a permissão 'cliente.ver_ficha' "
+        "em algum membership ativo; caso contrário, retorna apenas a própria ficha."
+    ),
+)
+def listar_clientes_endpoint(
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> list[ClienteOutput]:
+    usuario = UsuarioRepository(app.state.engine).buscar_por_provider_subject(
+        identidade.provider, identidade.subject
+    )
+    if usuario is None:
+        raise HTTPException(status_code=403, detail="identidade externa sem usuario interno")
+    memberships = MembershipRepository(app.state.engine).listar_por_usuario_id(usuario.id)
+    pode_ver_todos = any(
+        membership.tem_permissao("cliente.ver_ficha") for membership in memberships
+    )
+    clientes = ClienteRepository(app.state.engine).listar()
+    if not pode_ver_todos:
+        clientes = [cliente for cliente in clientes if cliente.usuario_id == usuario.id]
+    return [cliente_para_output(cliente) for cliente in clientes]
 
 
 @app.get(
@@ -1592,7 +1737,11 @@ def anonimizar_cliente_endpoint(
     response_model=list[MembershipOutput],
     tags=["Memberships"],
     summary="Lista memberships",
-    description="Recupera os vínculos entre usuários, organizações e papéis do sistema.",
+    description=(
+        "Recupera os vínculos entre usuários, organizações e papéis. Para quem tem a "
+        "permissão 'plataforma.visualizar_metricas_globais' (admin da plataforma), "
+        "retorna todos os memberships do sistema; caso contrário, apenas os próprios."
+    ),
 )
 def listar_memberships_endpoint(
     identidade: IdentidadeExterna = Depends(identidade_autenticada),
@@ -1604,10 +1753,13 @@ def listar_memberships_endpoint(
     )
     if usuario is None:
         raise HTTPException(status_code=403, detail="identidade externa sem usuario interno")
-    return [
-        membership_para_output(item)
-        for item in repo.listar_por_usuario_id(usuario.id)
-    ]
+    proprios = repo.listar_por_usuario_id(usuario.id)
+    pode_ver_todos = any(
+        membership.tem_permissao("plataforma.visualizar_metricas_globais")
+        for membership in proprios
+    )
+    itens = repo.listar() if pode_ver_todos else proprios
+    return [membership_para_output(item) for item in itens]
 
 
 @app.get(
@@ -1989,6 +2141,65 @@ def criar_profissional_independente_endpoint(
 
 
 @app.post(
+    "/organizacoes/com-equipe",
+    response_model=ProfissionalIndependenteOutput,
+    tags=["Organizações"],
+    summary="Cria organização com equipe e vincula o usuário autenticado como dono",
+    description=(
+        "Cria uma organização não unipessoal e vincula o usuário autenticado como "
+        "dono, permitindo montar equipe em seguida via POST /memberships. "
+        "Complementa /profissionais/independente, que cobre o caso autônomo puro: "
+        "sem este endpoint, uma organização criada via POST /organizacoes ficava "
+        "sem ninguém com permissão para gerenciar sua equipe."
+    ),
+)
+def criar_organizacao_com_equipe_endpoint(
+    payload: ProfissionalIndependenteInput,
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> ProfissionalIndependenteOutput:
+    usuario = UsuarioRepository(app.state.engine).buscar_por_provider_subject(
+        identidade.provider,
+        identidade.subject,
+    )
+    if usuario is None:
+        raise HTTPException(
+            status_code=403,
+            detail="identidade externa sem usuario interno",
+        )
+
+    papel_dono = PapelRepository(app.state.engine).buscar_por_chave("dono")
+    if papel_dono is None:
+        raise HTTPException(
+            status_code=503,
+            detail="catalogo de papeis nao inicializado",
+        )
+
+    endereco = None
+    if payload.endereco is not None:
+        endereco = Endereco(
+            logradouro=payload.endereco.logradouro,
+            numero=payload.endereco.numero,
+            cidade=payload.endereco.cidade,
+            estado=payload.endereco.estado,
+            cep=payload.endereco.cep,
+        )
+
+    perfil = CriarOrganizacaoComEquipe(
+        OrganizacaoRepository(app.state.engine),
+        MembershipRepository(app.state.engine),
+    ).executar(
+        usuario_id=usuario.id,
+        nome=payload.nome,
+        papel_dono=papel_dono,
+        endereco=endereco,
+    )
+    return ProfissionalIndependenteOutput(
+        organizacao=organizacao_para_output(perfil.organizacao),
+        membership=membership_para_output(perfil.membership),
+    )
+
+
+@app.post(
     "/servicos",
     response_model=ServicoOutput,
     tags=["Serviços"],
@@ -2017,6 +2228,9 @@ def criar_servico_endpoint(
         preco_base=payload.preco_base,
         profissional_id=profissional_id,
         organizacao_id=organizacao_id,
+        tipo_procedimento_id=(
+            uuid.UUID(payload.tipo_procedimento_id) if payload.tipo_procedimento_id else None
+        ),
         modalidades=tuple(
             ModalidadeAtendimento(
                 chave=item.chave,
@@ -2029,25 +2243,7 @@ def criar_servico_endpoint(
         ),
     )
     salvo = use_case.executar(servico)
-    return ServicoOutput(
-        id=str(salvo.id),
-        nome=salvo.nome,
-        categoria=salvo.categoria,
-        duracao_base_minutos=salvo.duracao_base_minutos,
-        preco_base=salvo.preco_base,
-        profissional_id=str(salvo.profissional_id) if salvo.profissional_id else None,
-        organizacao_id=str(salvo.organizacao_id) if salvo.organizacao_id else None,
-        modalidades=[
-            ModalidadeOutput(
-                chave=item.chave,
-                nome=item.nome,
-                ajuste_preco_fixo=item.ajuste_preco_fixo,
-                ajuste_preco_percentual=item.ajuste_preco_percentual,
-                ajuste_duracao_minutos=item.ajuste_duracao_minutos,
-            )
-            for item in salvo.modalidades
-        ],
-    )
+    return servico_para_output(salvo)
 
 
 @app.post(
@@ -2158,6 +2354,89 @@ def criar_pacote_endpoint(
     )
 
 
+@app.put(
+    "/pacotes/{pacote_id}",
+    response_model=PacoteOutput,
+    tags=["Pacotes"],
+    summary="Atualiza pacote",
+    description="Altera nome, serviços, duração ou preço de um pacote existente.",
+)
+def atualizar_pacote_endpoint(
+    pacote_id: str,
+    payload: PacoteInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_pacote),
+) -> PacoteOutput:
+    repo = PacoteRepository(app.state.engine)
+    pacote = repo.buscar_por_id(uuid.UUID(pacote_id))
+    if pacote is None:
+        raise HTTPException(status_code=404, detail="Pacote não encontrado")
+    exigir_acesso_oferta(
+        identidade,
+        organizacao_id=pacote.organizacao_id,
+        profissional_id=pacote.profissional_id,
+        permissao="pacote.gerenciar",
+    )
+    profissional_id = uuid.UUID(str(payload.profissional_id)) if payload.profissional_id else None
+    organizacao_id = uuid.UUID(str(payload.organizacao_id)) if payload.organizacao_id else None
+    exigir_acesso_oferta(
+        identidade,
+        organizacao_id=organizacao_id,
+        profissional_id=profissional_id,
+        permissao="pacote.gerenciar",
+    )
+    servico_repo = ServicoRepository(app.state.engine)
+    servicos = [
+        servico_repo.buscar_por_id(uuid.UUID(str(servico_id)))
+        for servico_id in payload.servico_ids
+    ]
+    if any(servico is None for servico in servicos):
+        raise HTTPException(status_code=422, detail="pacote referencia servico inexistente")
+    atualizado = Pacote(
+        id=pacote.id,
+        nome=payload.nome,
+        servico_ids=tuple(uuid.UUID(str(item)) for item in payload.servico_ids),
+        duracao_total_minutos=payload.duracao_total_minutos,
+        preco=payload.preco,
+        profissional_id=profissional_id,
+        organizacao_id=organizacao_id,
+    )
+    salvo = repo.atualizar(atualizado)
+    return PacoteOutput(
+        id=str(salvo.id),
+        nome=salvo.nome,
+        servico_ids=[str(item) for item in salvo.servico_ids],
+        duracao_total_minutos=salvo.duracao_total_minutos,
+        preco=salvo.preco,
+        profissional_id=str(salvo.profissional_id) if salvo.profissional_id else None,
+        organizacao_id=str(salvo.organizacao_id) if salvo.organizacao_id else None,
+    )
+
+
+@app.delete(
+    "/pacotes/{pacote_id}",
+    status_code=200,
+    tags=["Pacotes"],
+    summary="Remove pacote",
+    description="Exclui um pacote de serviços do catálogo.",
+)
+def remover_pacote_endpoint(
+    pacote_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_pacote),
+) -> dict[str, str]:
+    repo = PacoteRepository(app.state.engine)
+    pacote = repo.buscar_por_id(uuid.UUID(pacote_id))
+    if pacote is None:
+        raise HTTPException(status_code=404, detail="Pacote não encontrado")
+    exigir_acesso_oferta(
+        identidade,
+        organizacao_id=pacote.organizacao_id,
+        profissional_id=pacote.profissional_id,
+        permissao="pacote.gerenciar",
+    )
+    repo.remover(uuid.UUID(pacote_id))
+    return {"status": "deleted"}
+
+
 @app.post(
     "/disponibilidades",
     response_model=DisponibilidadeOutput,
@@ -2215,6 +2494,99 @@ def criar_disponibilidade_endpoint(
         profissional_id=str(salvo.profissional_id) if salvo.profissional_id else None,
         organizacao_id=str(salvo.organizacao_id) if salvo.organizacao_id else None,
     )
+
+
+@app.put(
+    "/disponibilidades/{disponibilidade_id}",
+    response_model=DisponibilidadeOutput,
+    tags=["Disponibilidade"],
+    summary="Atualiza disponibilidade",
+    description="Substitui janelas semanais e exceções de uma disponibilidade existente.",
+)
+def atualizar_disponibilidade_endpoint(
+    disponibilidade_id: str,
+    payload: DisponibilidadeInput,
+    identidade: IdentidadeExterna = Depends(exigir_configurar_agenda),
+) -> DisponibilidadeOutput:
+    repo = DisponibilidadeRepository(app.state.engine)
+    disponibilidade = repo.buscar_por_id(uuid.UUID(disponibilidade_id))
+    if disponibilidade is None:
+        raise HTTPException(status_code=404, detail="Disponibilidade não encontrada")
+    exigir_acesso_oferta(
+        identidade,
+        organizacao_id=disponibilidade.organizacao_id,
+        profissional_id=disponibilidade.profissional_id,
+        permissao="agenda.configurar",
+    )
+    profissional_id = uuid.UUID(str(payload.profissional_id)) if payload.profissional_id else None
+    organizacao_id = uuid.UUID(str(payload.organizacao_id)) if payload.organizacao_id else None
+    exigir_acesso_oferta(
+        identidade,
+        organizacao_id=organizacao_id,
+        profissional_id=profissional_id,
+        permissao="agenda.configurar",
+    )
+    atualizada = Disponibilidade(
+        id=disponibilidade.id,
+        semanal=tuple(
+            JanelaSemanal(
+                dia_semana=item.dia_semana,
+                intervalo=IntervaloHorario(inicio=item.intervalo.inicio, fim=item.intervalo.fim),
+            )
+            for item in payload.semanal
+        ),
+        excecoes=tuple(
+            ExcecaoAgenda(
+                data=item.data,
+                intervalos=tuple(
+                    IntervaloHorario(inicio=i.inicio, fim=i.fim)
+                    for i in item.intervalos
+                ),
+            )
+            for item in payload.excecoes
+        ),
+        profissional_id=profissional_id,
+        organizacao_id=organizacao_id,
+    )
+    salvo = repo.atualizar(atualizada)
+    return DisponibilidadeOutput(
+        id=str(salvo.id),
+        semanal=[
+            {"dia_semana": item.dia_semana, "intervalo": {"inicio": item.intervalo.inicio.isoformat(), "fim": item.intervalo.fim.isoformat()}}
+            for item in salvo.semanal
+        ],
+        excecoes=[
+            {"data": item.data.isoformat(), "intervalos": [{"inicio": i.inicio.isoformat(), "fim": i.fim.isoformat()} for i in item.intervalos]}
+            for item in salvo.excecoes
+        ],
+        profissional_id=str(salvo.profissional_id) if salvo.profissional_id else None,
+        organizacao_id=str(salvo.organizacao_id) if salvo.organizacao_id else None,
+    )
+
+
+@app.delete(
+    "/disponibilidades/{disponibilidade_id}",
+    status_code=200,
+    tags=["Disponibilidade"],
+    summary="Remove disponibilidade",
+    description="Exclui uma disponibilidade cadastrada.",
+)
+def remover_disponibilidade_endpoint(
+    disponibilidade_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_configurar_agenda),
+) -> dict[str, str]:
+    repo = DisponibilidadeRepository(app.state.engine)
+    disponibilidade = repo.buscar_por_id(uuid.UUID(disponibilidade_id))
+    if disponibilidade is None:
+        raise HTTPException(status_code=404, detail="Disponibilidade não encontrada")
+    exigir_acesso_oferta(
+        identidade,
+        organizacao_id=disponibilidade.organizacao_id,
+        profissional_id=disponibilidade.profissional_id,
+        permissao="agenda.configurar",
+    )
+    repo.remover(uuid.UUID(disponibilidade_id))
+    return {"status": "deleted"}
 
 
 @app.get(
@@ -2446,6 +2818,94 @@ def criar_programa_fidelidade_endpoint(
     )
 
 
+@app.put(
+    "/programas-fidelidade/{programa_id}",
+    response_model=ProgramaFidelidadeOutput,
+    tags=["Fidelidade"],
+    summary="Atualiza programa de fidelidade",
+    description="Altera critério de contagem, recompensa ou segmento de um programa existente.",
+)
+def atualizar_programa_fidelidade_endpoint(
+    programa_id: str,
+    payload: ProgramaFidelidadeInput,
+    identidade: IdentidadeExterna = Depends(exigir_configurar_fidelidade),
+) -> ProgramaFidelidadeOutput:
+    repo = ProgramaFidelidadeRepository(app.state.engine)
+    programa = repo.buscar_por_id(uuid.UUID(programa_id))
+    if programa is None:
+        raise HTTPException(status_code=404, detail="Programa de fidelidade não encontrado")
+    exigir_acesso_oferta(
+        identidade,
+        organizacao_id=programa.organizacao_id,
+        profissional_id=programa.profissional_id,
+        permissao="fidelidade.configurar_programa",
+    )
+    profissional_id = uuid.UUID(str(payload.profissional_id)) if payload.profissional_id else None
+    organizacao_id = uuid.UUID(str(payload.organizacao_id)) if payload.organizacao_id else None
+    exigir_acesso_oferta(
+        identidade,
+        organizacao_id=organizacao_id,
+        profissional_id=profissional_id,
+        permissao="fidelidade.configurar_programa",
+    )
+    atualizado = ProgramaFidelidade(
+        id=programa.id,
+        nome=payload.nome,
+        alvo_servico_id=uuid.UUID(str(payload.alvo_servico_id)) if payload.alvo_servico_id else None,
+        alvo_pacote_id=uuid.UUID(str(payload.alvo_pacote_id)) if payload.alvo_pacote_id else None,
+        atendimentos_necessarios=payload.atendimentos_necessarios,
+        recompensa=RecompensaFidelidade(
+            tipo=payload.recompensa.tipo,
+            valor=payload.recompensa.valor,
+            alvo_id=uuid.UUID(str(payload.recompensa.alvo_id)) if payload.recompensa.alvo_id else None,
+        ),
+        segmento_cliente=payload.segmento_cliente,
+        profissional_id=profissional_id,
+        organizacao_id=organizacao_id,
+    )
+    salvo = repo.atualizar(atualizado)
+    return ProgramaFidelidadeOutput(
+        id=str(salvo.id),
+        nome=salvo.nome,
+        alvo_servico_id=str(salvo.alvo_servico_id) if salvo.alvo_servico_id else None,
+        alvo_pacote_id=str(salvo.alvo_pacote_id) if salvo.alvo_pacote_id else None,
+        atendimentos_necessarios=salvo.atendimentos_necessarios,
+        recompensa={
+            "tipo": salvo.recompensa.tipo,
+            "valor": str(salvo.recompensa.valor) if salvo.recompensa.valor is not None else None,
+            "alvo_id": str(salvo.recompensa.alvo_id) if salvo.recompensa.alvo_id else None,
+        },
+        segmento_cliente=salvo.segmento_cliente,
+        profissional_id=str(salvo.profissional_id) if salvo.profissional_id else None,
+        organizacao_id=str(salvo.organizacao_id) if salvo.organizacao_id else None,
+    )
+
+
+@app.delete(
+    "/programas-fidelidade/{programa_id}",
+    status_code=200,
+    tags=["Fidelidade"],
+    summary="Remove programa de fidelidade",
+    description="Exclui um programa de fidelidade do catálogo.",
+)
+def remover_programa_fidelidade_endpoint(
+    programa_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_configurar_fidelidade),
+) -> dict[str, str]:
+    repo = ProgramaFidelidadeRepository(app.state.engine)
+    programa = repo.buscar_por_id(uuid.UUID(programa_id))
+    if programa is None:
+        raise HTTPException(status_code=404, detail="Programa de fidelidade não encontrado")
+    exigir_acesso_oferta(
+        identidade,
+        organizacao_id=programa.organizacao_id,
+        profissional_id=programa.profissional_id,
+        permissao="fidelidade.configurar_programa",
+    )
+    repo.remover(uuid.UUID(programa_id))
+    return {"status": "deleted"}
+
+
 @app.post(
     "/progresso-fidelidade",
     response_model=ProgressoFidelidadeOutput,
@@ -2502,6 +2962,82 @@ def resgatar_fidelidade_endpoint(payload: ResgateFidelidadeInput) -> ResgateFide
         gratuito=resultado.aplicacao.gratuito,
         atendimentos_restantes=resultado.progresso.atendimentos_concluidos,
     )
+
+
+def _registro_resgate_para_output(registro: object) -> ResgateFidelidadeRegistroOutput:
+    return ResgateFidelidadeRegistroOutput(
+        resgate_id=registro.id,
+        programa_id=registro.programa_id,
+        cliente_id=registro.cliente_id,
+        agendamento_id=registro.agendamento_id,
+        preco_original=Decimal(registro.preco_original),
+        desconto=Decimal(registro.desconto),
+        preco_final=Decimal(registro.preco_final),
+        gratuito=registro.gratuito,
+    )
+
+
+def _acesso_permitido_ao_programa(
+    identidade: IdentidadeExterna, usuario_id: uuid.UUID, programa_id: str
+) -> bool:
+    programa = ProgramaFidelidadeRepository(app.state.engine).buscar_por_id(uuid.UUID(programa_id))
+    if programa is None:
+        return False
+    if programa.profissional_id == usuario_id:
+        return True
+    if programa.organizacao_id is None:
+        return False
+    memberships = MembershipRepository(app.state.engine).listar_por_usuario_id(usuario_id)
+    return any(
+        membership.organizacao_id == programa.organizacao_id and membership.ativo
+        for membership in memberships
+    )
+
+
+@app.get(
+    "/fidelidade/resgates",
+    response_model=list[ResgateFidelidadeRegistroOutput],
+    tags=["Fidelidade"],
+    summary="Lista resgates de fidelidade",
+    description="Retorna os resgates dos programas de fidelidade que o usuário autenticado pode gerenciar.",
+)
+def listar_resgates_fidelidade_endpoint(
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> list[ResgateFidelidadeRegistroOutput]:
+    usuario = UsuarioRepository(app.state.engine).buscar_por_provider_subject(
+        identidade.provider, identidade.subject
+    )
+    if usuario is None:
+        raise HTTPException(status_code=403, detail="identidade externa sem usuario interno")
+    repo = ResgateFidelidadeRepository(app.state.engine)
+    return [
+        _registro_resgate_para_output(registro)
+        for registro in repo.listar()
+        if _acesso_permitido_ao_programa(identidade, usuario.id, registro.programa_id)
+    ]
+
+
+@app.get(
+    "/fidelidade/resgates/{resgate_id}",
+    response_model=ResgateFidelidadeRegistroOutput,
+    tags=["Fidelidade"],
+    summary="Busca resgate de fidelidade por ID",
+)
+def buscar_resgate_fidelidade_endpoint(
+    resgate_id: str,
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> ResgateFidelidadeRegistroOutput:
+    usuario = UsuarioRepository(app.state.engine).buscar_por_provider_subject(
+        identidade.provider, identidade.subject
+    )
+    if usuario is None:
+        raise HTTPException(status_code=403, detail="identidade externa sem usuario interno")
+    registro = ResgateFidelidadeRepository(app.state.engine).buscar_por_id(uuid.UUID(resgate_id))
+    if registro is None:
+        raise HTTPException(status_code=404, detail="Resgate de fidelidade não encontrado")
+    if not _acesso_permitido_ao_programa(identidade, usuario.id, registro.programa_id):
+        raise HTTPException(status_code=403, detail="sem acesso ao programa deste resgate")
+    return _registro_resgate_para_output(registro)
 
 
 @app.post(
@@ -2609,6 +3145,88 @@ def criar_lembrete_agendamento_endpoint(
         mensagem=notificacao.mensagem,
         enviar_em=notificacao.enviar_em,
     )
+
+
+def _notificacao_para_output(notificacao: object) -> NotificacaoOutput:
+    return NotificacaoOutput(
+        agendamento_id=notificacao.agendamento_id,
+        destinatario=DestinatarioNotificacaoInput(
+            id=notificacao.destinatario.id,
+            canal=notificacao.destinatario.canal,
+            destino=notificacao.destinatario.destino,
+        ),
+        mensagem=notificacao.mensagem,
+        enviar_em=notificacao.enviar_em,
+        status=notificacao.status,
+        tentativas=notificacao.tentativas,
+        erro=notificacao.erro,
+        enviado_em=notificacao.enviado_em,
+    )
+
+
+def _acesso_permitido_ao_agendamento(
+    identidade: IdentidadeExterna, usuario_id: uuid.UUID, agendamento_id: str
+) -> bool:
+    agendamento = AgendamentoRepository(app.state.engine).buscar_por_id(uuid.UUID(agendamento_id))
+    if agendamento is None:
+        return False
+    if agendamento.profissional_id == usuario_id:
+        return True
+    if agendamento.organizacao_id is None:
+        return False
+    memberships = MembershipRepository(app.state.engine).listar_por_usuario_id(usuario_id)
+    return any(
+        membership.organizacao_id == agendamento.organizacao_id and membership.ativo
+        for membership in memberships
+    )
+
+
+@app.get(
+    "/lembretes",
+    response_model=list[NotificacaoOutput],
+    tags=["Notificações"],
+    summary="Lista lembretes/notificações",
+    description="Retorna os lembretes de agendamentos que o usuário autenticado pode gerenciar.",
+)
+def listar_lembretes_endpoint(
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> list[NotificacaoOutput]:
+    usuario = UsuarioRepository(app.state.engine).buscar_por_provider_subject(
+        identidade.provider, identidade.subject
+    )
+    if usuario is None:
+        raise HTTPException(status_code=403, detail="identidade externa sem usuario interno")
+    repo = NotificacaoAgendamentoRepository(app.state.engine)
+    return [
+        _notificacao_para_output(notificacao)
+        for notificacao in repo.listar()
+        if _acesso_permitido_ao_agendamento(identidade, usuario.id, notificacao.agendamento_id)
+    ]
+
+
+@app.get(
+    "/agendamentos/{agendamento_id}/lembretes",
+    response_model=NotificacaoOutput,
+    tags=["Notificações"],
+    summary="Busca lembrete por agendamento",
+)
+def buscar_lembrete_agendamento_endpoint(
+    agendamento_id: str,
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> NotificacaoOutput:
+    usuario = UsuarioRepository(app.state.engine).buscar_por_provider_subject(
+        identidade.provider, identidade.subject
+    )
+    if usuario is None:
+        raise HTTPException(status_code=403, detail="identidade externa sem usuario interno")
+    if not _acesso_permitido_ao_agendamento(identidade, usuario.id, agendamento_id):
+        raise HTTPException(status_code=403, detail="sem acesso ao agendamento deste lembrete")
+    notificacao = NotificacaoAgendamentoRepository(app.state.engine).buscar_por_agendamento_id(
+        agendamento_id
+    )
+    if notificacao is None:
+        raise HTTPException(status_code=404, detail="Lembrete não encontrado")
+    return _notificacao_para_output(notificacao)
 
 
 @app.post(
@@ -2770,6 +3388,103 @@ def listar_regras_comissao_endpoint(
     ]
 
 
+def _exigir_acesso_regra_comissao(
+    identidade: IdentidadeExterna, regra: RegraComissao
+) -> None:
+    if regra.membership_id is not None:
+        membership = MembershipRepository(app.state.engine).buscar_por_id(regra.membership_id)
+        if membership is None or membership.organizacao_id is None:
+            raise HTTPException(status_code=422, detail="membership da regra nao encontrado")
+        exigir_acesso_organizacao(identidade, membership.organizacao_id, "comissao.configurar_regra")
+    elif regra.servico_id is not None:
+        servico = ServicoRepository(app.state.engine).buscar_por_id(regra.servico_id)
+        if servico is None:
+            raise HTTPException(status_code=422, detail="servico da regra nao encontrado")
+        exigir_acesso_oferta(
+            identidade,
+            organizacao_id=servico.organizacao_id,
+            profissional_id=servico.profissional_id,
+            permissao="comissao.configurar_regra",
+        )
+
+
+@app.get(
+    "/comissoes/regras/{regra_id}",
+    response_model=RegraComissaoOutput,
+    tags=["Comissão"],
+    summary="Busca regra de comissão por ID",
+)
+def buscar_regra_comissao_endpoint(
+    regra_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_configurar_comissao),
+) -> RegraComissaoOutput:
+    regra = RegraComissaoRepository(app.state.engine).buscar_por_id(uuid.UUID(regra_id))
+    if regra is None:
+        raise HTTPException(status_code=404, detail="Regra de comissão não encontrada")
+    _exigir_acesso_regra_comissao(identidade, regra)
+    return RegraComissaoOutput(
+        id=str(regra.id),
+        tipo=regra.tipo,
+        valor=regra.valor,
+        membership_id=str(regra.membership_id) if regra.membership_id else None,
+        servico_id=str(regra.servico_id) if regra.servico_id else None,
+    )
+
+
+@app.put(
+    "/comissoes/regras/{regra_id}",
+    response_model=RegraComissaoOutput,
+    tags=["Comissão"],
+    summary="Atualiza regra de comissão",
+    description="Altera tipo, valor ou associação de uma regra de comissão existente.",
+)
+def atualizar_regra_comissao_endpoint(
+    regra_id: str,
+    payload: RegraComissaoInput,
+    identidade: IdentidadeExterna = Depends(exigir_configurar_comissao),
+) -> RegraComissaoOutput:
+    repo = RegraComissaoRepository(app.state.engine)
+    regra = repo.buscar_por_id(uuid.UUID(regra_id))
+    if regra is None:
+        raise HTTPException(status_code=404, detail="Regra de comissão não encontrada")
+    _exigir_acesso_regra_comissao(identidade, regra)
+    atualizada = RegraComissao(
+        id=regra.id,
+        tipo=payload.tipo,
+        valor=payload.valor,
+        membership_id=uuid.UUID(payload.membership_id) if payload.membership_id else None,
+        servico_id=uuid.UUID(payload.servico_id) if payload.servico_id else None,
+    )
+    _exigir_acesso_regra_comissao(identidade, atualizada)
+    salvo = repo.atualizar(atualizada)
+    return RegraComissaoOutput(
+        id=str(salvo.id),
+        tipo=salvo.tipo,
+        valor=salvo.valor,
+        membership_id=str(salvo.membership_id) if salvo.membership_id else None,
+        servico_id=str(salvo.servico_id) if salvo.servico_id else None,
+    )
+
+
+@app.delete(
+    "/comissoes/regras/{regra_id}",
+    status_code=200,
+    tags=["Comissão"],
+    summary="Remove regra de comissão",
+)
+def remover_regra_comissao_endpoint(
+    regra_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_configurar_comissao),
+) -> dict[str, str]:
+    repo = RegraComissaoRepository(app.state.engine)
+    regra = repo.buscar_por_id(uuid.UUID(regra_id))
+    if regra is None:
+        raise HTTPException(status_code=404, detail="Regra de comissão não encontrada")
+    _exigir_acesso_regra_comissao(identidade, regra)
+    repo.remover(uuid.UUID(regra_id))
+    return {"status": "deleted"}
+
+
 @app.post(
     "/comissoes/relatorio",
     response_model=ComissaoRelatorioOutput,
@@ -2871,3 +3586,452 @@ def consultar_estatisticas_endpoint(
         ocupacao_minutos=estatisticas.ocupacao_minutos,
         receita_registrada=estatisticas.receita_registrada,
     )
+
+
+def _papel_para_output(papel: Papel) -> PapelOutput:
+    return PapelOutput(
+        id=str(papel.id),
+        chave=papel.chave,
+        nome=papel.nome,
+        permissoes=sorted(papel.permissoes),
+    )
+
+
+@app.get(
+    "/catalogo/papeis",
+    response_model=list[PapelOutput],
+    tags=["Catálogos"],
+    dependencies=[Depends(identidade_autenticada)],
+    summary="Lista papéis do catálogo",
+    description="Retorna todos os papéis (roles) disponíveis para composição de memberships.",
+)
+def listar_papeis_endpoint() -> list[PapelOutput]:
+    return [_papel_para_output(item) for item in PapelRepository(app.state.engine).listar()]
+
+
+@app.get(
+    "/catalogo/papeis/{papel_id}",
+    response_model=PapelOutput,
+    tags=["Catálogos"],
+    dependencies=[Depends(identidade_autenticada)],
+    summary="Busca papel por ID",
+)
+def buscar_papel_endpoint(papel_id: str) -> PapelOutput:
+    papel = PapelRepository(app.state.engine).buscar_por_id(uuid.UUID(papel_id))
+    if papel is None:
+        raise HTTPException(status_code=404, detail="Papel não encontrado")
+    return _papel_para_output(papel)
+
+
+@app.post(
+    "/catalogo/papeis",
+    response_model=PapelOutput,
+    tags=["Catálogos"],
+    summary="Cria papel no catálogo",
+    description="Adiciona um novo papel (role) com seu conjunto de permissões.",
+)
+def criar_papel_endpoint(
+    payload: PapelInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> PapelOutput:
+    repo = PapelRepository(app.state.engine)
+    if repo.buscar_por_chave(payload.chave) is not None:
+        raise HTTPException(status_code=409, detail="chave de papel ja cadastrada")
+    papel = Papel(
+        id=uuid.uuid7(),
+        chave=payload.chave,
+        nome=payload.nome,
+        permissoes=frozenset(payload.permissoes),
+    )
+    return _papel_para_output(repo.salvar(papel))
+
+
+@app.put(
+    "/catalogo/papeis/{papel_id}",
+    response_model=PapelOutput,
+    tags=["Catálogos"],
+    summary="Atualiza papel do catálogo",
+    description="Altera nome ou permissões de um papel existente.",
+)
+def atualizar_papel_endpoint(
+    papel_id: str,
+    payload: PapelInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> PapelOutput:
+    repo = PapelRepository(app.state.engine)
+    papel = repo.buscar_por_id(uuid.UUID(papel_id))
+    if papel is None:
+        raise HTTPException(status_code=404, detail="Papel não encontrado")
+    atualizado = Papel(
+        id=papel.id,
+        chave=payload.chave,
+        nome=payload.nome,
+        permissoes=frozenset(payload.permissoes),
+    )
+    return _papel_para_output(repo.atualizar(atualizado))
+
+
+@app.delete(
+    "/catalogo/papeis/{papel_id}",
+    status_code=200,
+    tags=["Catálogos"],
+    summary="Remove papel do catálogo",
+    description="Exclui um papel do catálogo; não afeta memberships que já o referenciam.",
+)
+def remover_papel_endpoint(
+    papel_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> dict[str, str]:
+    repo = PapelRepository(app.state.engine)
+    if repo.buscar_por_id(uuid.UUID(papel_id)) is None:
+        raise HTTPException(status_code=404, detail="Papel não encontrado")
+    repo.remover(uuid.UUID(papel_id))
+    return {"status": "deleted"}
+
+
+@app.get(
+    "/catalogo/status-agendamento",
+    response_model=CatalogoStatusOutput,
+    tags=["Catálogos"],
+    dependencies=[Depends(identidade_autenticada)],
+    summary="Consulta catálogo de status de agendamento",
+    description="Retorna todos os status possíveis e as transições permitidas entre eles.",
+)
+def obter_catalogo_status_endpoint() -> CatalogoStatusOutput:
+    catalogo = CatalogoStatusRepository(app.state.engine).obter()
+    return CatalogoStatusOutput(
+        status=[
+            StatusAgendamentoInput(chave=item.chave, nome=item.nome)
+            for item in catalogo.status
+        ],
+        transicoes=[
+            TransicaoStatusInput(de=item.de, para=item.para, atores=sorted(item.atores))
+            for item in catalogo.transicoes
+        ],
+    )
+
+
+@app.put(
+    "/catalogo/status-agendamento",
+    response_model=CatalogoStatusOutput,
+    tags=["Catálogos"],
+    summary="Adiciona status/transições ao catálogo",
+    description=(
+        "Adiciona novos status e transições ao catálogo (operação aditiva: não remove "
+        "entradas existentes, já que status/transições em uso não podem ser apagados)."
+    ),
+)
+def atualizar_catalogo_status_endpoint(
+    payload: CatalogoStatusInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> CatalogoStatusOutput:
+    catalogo = CatalogoStatus(
+        status=tuple(
+            StatusAgendamento(chave=item.chave, nome=item.nome) for item in payload.status
+        ),
+        transicoes=tuple(
+            TransicaoStatus(de=item.de, para=item.para, atores=frozenset(item.atores))
+            for item in payload.transicoes
+        ),
+    )
+    CatalogoStatusRepository(app.state.engine).salvar(catalogo)
+    atualizado = CatalogoStatusRepository(app.state.engine).obter()
+    return CatalogoStatusOutput(
+        status=[
+            StatusAgendamentoInput(chave=item.chave, nome=item.nome)
+            for item in atualizado.status
+        ],
+        transicoes=[
+            TransicaoStatusInput(de=item.de, para=item.para, atores=sorted(item.atores))
+            for item in atualizado.transicoes
+        ],
+    )
+
+
+def _tipo_procedimento_para_output(tipo: TipoProcedimento) -> TipoProcedimentoOutput:
+    return TipoProcedimentoOutput(id=str(tipo.id), chave=tipo.chave, nome=tipo.nome)
+
+
+@app.get(
+    "/catalogo/tipos-procedimento",
+    response_model=list[TipoProcedimentoOutput],
+    tags=["Catálogos"],
+    dependencies=[Depends(limitar_endpoint_publico)],
+    summary="Lista tipos de procedimento",
+    description=(
+        "[Público, com rate limit] Catálogo controlado de tipos de procedimento "
+        "(ex: Manicure), usado para manter consistência entre salões/autônomos. "
+        "Servico.categoria (texto livre) continua existindo para casos fora do catálogo."
+    ),
+)
+def listar_tipos_procedimento_endpoint() -> list[TipoProcedimentoOutput]:
+    repo = TipoProcedimentoRepository(app.state.engine)
+    return [_tipo_procedimento_para_output(item) for item in repo.listar()]
+
+
+@app.get(
+    "/catalogo/tipos-procedimento/{tipo_id}",
+    response_model=TipoProcedimentoOutput,
+    tags=["Catálogos"],
+    dependencies=[Depends(limitar_endpoint_publico)],
+    summary="Busca tipo de procedimento por ID",
+)
+def buscar_tipo_procedimento_endpoint(tipo_id: str) -> TipoProcedimentoOutput:
+    tipo = TipoProcedimentoRepository(app.state.engine).buscar_por_id(uuid.UUID(tipo_id))
+    if tipo is None:
+        raise HTTPException(status_code=404, detail="Tipo de procedimento não encontrado")
+    return _tipo_procedimento_para_output(tipo)
+
+
+@app.post(
+    "/catalogo/tipos-procedimento",
+    response_model=TipoProcedimentoOutput,
+    tags=["Catálogos"],
+    summary="Cria tipo de procedimento",
+    description="Adiciona um novo tipo de procedimento ao catálogo controlado.",
+)
+def criar_tipo_procedimento_endpoint(
+    payload: TipoProcedimentoInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> TipoProcedimentoOutput:
+    repo = TipoProcedimentoRepository(app.state.engine)
+    if repo.buscar_por_chave(payload.chave) is not None:
+        raise HTTPException(status_code=409, detail="chave de tipo de procedimento ja cadastrada")
+    tipo = TipoProcedimento(id=uuid.uuid7(), chave=payload.chave, nome=payload.nome)
+    return _tipo_procedimento_para_output(repo.salvar(tipo))
+
+
+@app.put(
+    "/catalogo/tipos-procedimento/{tipo_id}",
+    response_model=TipoProcedimentoOutput,
+    tags=["Catálogos"],
+    summary="Atualiza tipo de procedimento",
+)
+def atualizar_tipo_procedimento_endpoint(
+    tipo_id: str,
+    payload: TipoProcedimentoInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> TipoProcedimentoOutput:
+    repo = TipoProcedimentoRepository(app.state.engine)
+    tipo = repo.buscar_por_id(uuid.UUID(tipo_id))
+    if tipo is None:
+        raise HTTPException(status_code=404, detail="Tipo de procedimento não encontrado")
+    atualizado = TipoProcedimento(id=tipo.id, chave=payload.chave, nome=payload.nome)
+    return _tipo_procedimento_para_output(repo.atualizar(atualizado))
+
+
+@app.delete(
+    "/catalogo/tipos-procedimento/{tipo_id}",
+    status_code=200,
+    tags=["Catálogos"],
+    summary="Remove tipo de procedimento",
+    description="Exclui um tipo de procedimento do catálogo; não afeta serviços que já o referenciam.",
+)
+def remover_tipo_procedimento_endpoint(
+    tipo_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> dict[str, str]:
+    repo = TipoProcedimentoRepository(app.state.engine)
+    if repo.buscar_por_id(uuid.UUID(tipo_id)) is None:
+        raise HTTPException(status_code=404, detail="Tipo de procedimento não encontrado")
+    repo.remover(uuid.UUID(tipo_id))
+    return {"status": "deleted"}
+
+
+def _media_para_output(media: Media, *, reaproveitada: bool = False) -> MediaOutput:
+    return MediaOutput(
+        id=str(media.id),
+        sha256=media.sha256,
+        mime_type=media.mime_type,
+        tamanho_bytes=media.tamanho_bytes,
+        nome_original=media.nome_original,
+        url=app.state.armazenamento.obter_url(media.storage_key),
+        reaproveitada=reaproveitada,
+    )
+
+
+@app.post(
+    "/medias",
+    response_model=MediaOutput,
+    tags=["Mídia"],
+    summary="Envia um arquivo binário",
+    description=(
+        "Recebe qualquer arquivo binário (foto, vídeo, PDF, documento) e grava seus "
+        "metadados. O conteúdo é deduplicado por sha256: reenviar um arquivo idêntico "
+        "reaproveita o registro existente em vez de gravar de novo."
+    ),
+)
+async def enviar_media_endpoint(
+    arquivo: UploadFile = File(...),
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> MediaOutput:
+    conteudo = await arquivo.read()
+    if not conteudo:
+        raise HTTPException(status_code=422, detail="arquivo vazio")
+    resultado = EnviarMedia(
+        MediaRepository(app.state.engine),
+        app.state.armazenamento,
+    ).executar(
+        conteudo=conteudo,
+        mime_type=arquivo.content_type or "application/octet-stream",
+        nome_original=arquivo.filename,
+    )
+    return _media_para_output(resultado.media, reaproveitada=resultado.reaproveitada)
+
+
+@app.get(
+    "/medias/{media_id}",
+    response_model=MediaOutput,
+    tags=["Mídia"],
+    dependencies=[Depends(identidade_autenticada)],
+    summary="Consulta metadados de uma mídia",
+)
+def buscar_media_endpoint(media_id: str) -> MediaOutput:
+    media = MediaRepository(app.state.engine).buscar_por_id(uuid.UUID(media_id))
+    if media is None:
+        raise HTTPException(status_code=404, detail="Mídia não encontrada")
+    return _media_para_output(media)
+
+
+@app.delete(
+    "/medias/{media_id}",
+    status_code=200,
+    tags=["Mídia"],
+    dependencies=[Depends(identidade_autenticada)],
+    summary="Remove uma mídia",
+    description="Só remove se nenhum anexo ainda referenciar esta mídia.",
+)
+def remover_media_endpoint(media_id: str) -> dict[str, str]:
+    repo = MediaRepository(app.state.engine)
+    media = repo.buscar_por_id(uuid.UUID(media_id))
+    if media is None:
+        raise HTTPException(status_code=404, detail="Mídia não encontrada")
+    if AnexoMediaRepository(app.state.engine).contar_por_media_id(media.id) > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="mídia ainda referenciada por um ou mais anexos",
+        )
+    app.state.armazenamento.remover(media.storage_key)
+    repo.remover(media.id)
+    return {"status": "deleted"}
+
+
+# Tipos de entidade com autorizacao ja modelada. Novos tipos devem ganhar um ramo aqui
+# antes de serem aceitos: por padrao (fail-closed), anexar a um tipo desconhecido e negado.
+def _autorizar_anexo(
+    identidade: IdentidadeExterna, entidade_tipo: str, entidade_id: uuid.UUID
+) -> None:
+    if entidade_tipo == "organizacao":
+        exigir_acesso_organizacao(identidade, entidade_id, "estabelecimento.configurar_dados")
+        return
+    if entidade_tipo == "servico":
+        servico = ServicoRepository(app.state.engine).buscar_por_id(entidade_id)
+        if servico is None:
+            raise HTTPException(status_code=422, detail="servico nao encontrado")
+        exigir_acesso_oferta(
+            identidade,
+            organizacao_id=servico.organizacao_id,
+            profissional_id=servico.profissional_id,
+            permissao="servico.gerenciar",
+        )
+        return
+    if entidade_tipo == "usuario":
+        usuario = UsuarioRepository(app.state.engine).buscar_por_provider_subject(
+            identidade.provider, identidade.subject
+        )
+        if usuario is None or usuario.id != entidade_id:
+            raise HTTPException(status_code=403, detail="só é possível anexar mídia ao próprio usuário")
+        return
+    raise HTTPException(
+        status_code=422,
+        detail=f"entidade_tipo '{entidade_tipo}' ainda não tem autorização modelada",
+    )
+
+
+@app.post(
+    "/anexos",
+    response_model=AnexoMediaOutput,
+    tags=["Mídia"],
+    summary="Anexa uma mídia a uma entidade",
+    description=(
+        "Vincula uma mídia já enviada a uma entidade (organização, serviço, usuário, "
+        "etc.) com um papel (ex: 'capa', 'galeria', 'documento'). Tipos de entidade "
+        "novos precisam de autorização própria antes de serem aceitos."
+    ),
+)
+def criar_anexo_endpoint(
+    payload: AnexoMediaInput,
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> AnexoMediaOutput:
+    media = MediaRepository(app.state.engine).buscar_por_id(uuid.UUID(payload.media_id))
+    if media is None:
+        raise HTTPException(status_code=422, detail="mídia não encontrada")
+    entidade_id = uuid.UUID(payload.entidade_id)
+    _autorizar_anexo(identidade, payload.entidade_tipo, entidade_id)
+    anexo = AnexarMedia(AnexoMediaRepository(app.state.engine)).executar(
+        media_id=media.id,
+        entidade_tipo=payload.entidade_tipo,
+        entidade_id=entidade_id,
+        papel=payload.papel,
+        ordem=payload.ordem,
+    )
+    return AnexoMediaOutput(
+        id=str(anexo.id),
+        entidade_tipo=anexo.entidade_tipo,
+        entidade_id=str(anexo.entidade_id),
+        papel=anexo.papel,
+        ordem=anexo.ordem,
+        media=_media_para_output(media),
+    )
+
+
+@app.get(
+    "/anexos",
+    response_model=list[AnexoMediaOutput],
+    tags=["Mídia"],
+    dependencies=[Depends(limitar_endpoint_publico)],
+    summary="Lista anexos de mídia de uma entidade",
+    description="[Público, com rate limit] Retorna as mídias anexadas a uma entidade, ordenadas por 'ordem'.",
+)
+def listar_anexos_endpoint(entidade_tipo: str, entidade_id: str) -> list[AnexoMediaOutput]:
+    repo = AnexoMediaRepository(app.state.engine)
+    media_repo = MediaRepository(app.state.engine)
+    anexos = repo.listar_por_entidade(entidade_tipo, uuid.UUID(entidade_id))
+    resultado = []
+    for anexo in anexos:
+        media = media_repo.buscar_por_id(anexo.media_id)
+        if media is None:
+            continue
+        resultado.append(
+            AnexoMediaOutput(
+                id=str(anexo.id),
+                entidade_tipo=anexo.entidade_tipo,
+                entidade_id=str(anexo.entidade_id),
+                papel=anexo.papel,
+                ordem=anexo.ordem,
+                media=_media_para_output(media),
+            )
+        )
+    return resultado
+
+
+@app.delete(
+    "/anexos/{anexo_id}",
+    status_code=200,
+    tags=["Mídia"],
+    summary="Remove um anexo de mídia",
+    description="Remove só o vínculo; a mídia em si permanece caso outras entidades a referenciem.",
+)
+def remover_anexo_endpoint(
+    anexo_id: str,
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> dict[str, str]:
+    repo = AnexoMediaRepository(app.state.engine)
+    anexo = repo.buscar_por_id(uuid.UUID(anexo_id))
+    if anexo is None:
+        raise HTTPException(status_code=404, detail="Anexo não encontrado")
+    _autorizar_anexo(identidade, anexo.entidade_tipo, anexo.entidade_id)
+    repo.remover(anexo.id)
+    return {"status": "deleted"}
+
+

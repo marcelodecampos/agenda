@@ -231,3 +231,13 @@ class ResgateFidelidadeRepository:
             ))
             session.commit()
         return resgate_id
+
+    def listar(self) -> list[ResgateFidelidadeModel]:
+        with criar_session(self.engine) as session:
+            return list(session.execute(select(ResgateFidelidadeModel)).scalars().all())
+
+    def buscar_por_id(self, id_: uuid.UUID) -> ResgateFidelidadeModel | None:
+        with criar_session(self.engine) as session:
+            return session.execute(
+                select(ResgateFidelidadeModel).where(ResgateFidelidadeModel.id == str(id_))
+            ).scalar_one_or_none()

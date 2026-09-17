@@ -51,6 +51,7 @@ class ServicoModel(Base):
     preco_base: Mapped[str] = mapped_column(String, nullable=False)
     profissional_id: Mapped[str | None] = mapped_column(String, nullable=True)
     organizacao_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    tipo_procedimento_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
     @classmethod
     def from_domain(cls, servico: Servico) -> "ServicoModel":
@@ -62,6 +63,9 @@ class ServicoModel(Base):
             preco_base=str(servico.preco_base),
             profissional_id=str(servico.profissional_id) if servico.profissional_id else None,
             organizacao_id=str(servico.organizacao_id) if servico.organizacao_id else None,
+            tipo_procedimento_id=(
+                str(servico.tipo_procedimento_id) if servico.tipo_procedimento_id else None
+            ),
         )
 
     def to_domain(self, modalidades: tuple[ModalidadeAtendimento, ...]) -> Servico:
@@ -73,8 +77,12 @@ class ServicoModel(Base):
             preco_base=Decimal(self.preco_base),
             profissional_id=uuid.UUID(self.profissional_id) if self.profissional_id else None,
             organizacao_id=uuid.UUID(self.organizacao_id) if self.organizacao_id else None,
+            tipo_procedimento_id=(
+                uuid.UUID(self.tipo_procedimento_id) if self.tipo_procedimento_id else None
+            ),
             modalidades=modalidades,
         )
+
 
 
 class ServicoRepository:

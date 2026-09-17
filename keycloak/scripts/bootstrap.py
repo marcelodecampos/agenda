@@ -6,15 +6,17 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 
 
 ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT.parent / ".env")
 CONFIG_PATH = Path(
     os.getenv("KEYCLOAK_REALM_CONFIG", ROOT / "config" / "realm.json")
 )
 BASE_URL = os.getenv("KEYCLOAK_BASE_URL", "http://localhost:8080").rstrip("/")
 ADMIN_USERNAME = os.getenv("KEYCLOAK_ADMIN", "admin")
-ADMIN_PASSWORD = os.getenv("KEYCLOAK_ADMIN_PASSWORD", "changeme")
+ADMIN_PASSWORD = os.getenv("KEYCLOAK_ADMIN_PASSWORD", "admin")
 
 
 class KeycloakAdmin:
@@ -183,6 +185,7 @@ class KeycloakAdmin:
         payload["credentials"] = [
             {"type": "password", "value": password, "temporary": False}
         ]
+        payload.setdefault("emailVerified", True)
 
         if not users:
             self._request("POST", f"/admin/realms/{realm}/users", json=payload)
