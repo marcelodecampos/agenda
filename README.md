@@ -46,3 +46,4 @@ poetry run python local-tools/get_keycloak_token.py --username 59469390415
 ```
 
 O access token é impresso na saída padrão. Para usar outro realm ou servidor, defina `KEYCLOAK_BASE_URL` e `KEYCLOAK_REALM` no ambiente.
+editado por Milady!
