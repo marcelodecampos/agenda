@@ -49,3 +49,4 @@ services:
 volumes:
   agenda_postgres_data:
   agenda_keycloak_data:
+
