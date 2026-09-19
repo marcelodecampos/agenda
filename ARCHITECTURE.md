@@ -117,6 +117,20 @@ O Docker Compose sera utilizado para desenvolvimento local e para apoiar testes 
 
 O backend HTTP do MVP usara FastAPI, com Uvicorn como servidor ASGI. A camada HTTP permanecera na borda da aplicacao e nao sera acessada diretamente pelo dominio.
 
+### 7.1 Catalogo de servicos
+
+O catalogo minimo separa o nome reutilizavel do servico da oferta concreta:
+
+```text
+Categoria <-> NomeServico <- Servico
+```
+
+`Categoria` e `NomeServico` possuem `id` e `nome`. A relacao entre eles e N:N,
+pois um nome pode pertencer a varias categorias. `Servico` referencia
+`NomeServico` por chave estrangeira e mantem preco, duracao, ofertante e
+modalidades da oferta concreta. Nao ha tabela de aliases ou sinonimos no MVP;
+essa extensao depende de necessidade comprovada.
+
 ### 8. Framework do frontend
 
 O frontend web do MVP usara Next.js, React e TypeScript. O Next.js sera responsavel pela experiencia web responsiva e pela base PWA, enquanto o FastAPI permanecera como backend e proprietario das regras de negocio.

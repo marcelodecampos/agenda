@@ -4,11 +4,12 @@ import uuid
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from threading import Lock
-from time import monotonic
+from time import monotonic, perf_counter
 
 import structlog
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -81,6 +82,7 @@ from agenda.domain.membership import Membership
 from agenda.domain.organizacao import Organizacao
 from agenda.domain.pacote import Pacote
 from agenda.domain.papel import Papel
+from agenda.domain.catalogo_servico import NomeServico
 from agenda.domain.servico import ModalidadeAtendimento, Servico
 from agenda.domain.tipo_procedimento import TipoProcedimento
 from agenda.domain.media import AnexoMedia, Media
@@ -99,7 +101,7 @@ from agenda.infrastructure.membership_repository import MembershipRepository, Pa
 from agenda.infrastructure.notificacao_repository import NotificacaoAgendamentoRepository
 from agenda.infrastructure.organizacao_repository import OrganizacaoRepository
 from agenda.infrastructure.pacote_repository import PacoteRepository
-from agenda.infrastructure.servico_repository import ServicoRepository
+from agenda.infrastructure.servico_repository import NomeServicoRepository, ServicoRepository
 from agenda.infrastructure.status_agendamento_repository import CatalogoStatusRepository
 from agenda.infrastructure.tipo_procedimento_repository import TipoProcedimentoRepository
 from agenda.infrastructure.media_repository import AnexoMediaRepository, MediaRepository
@@ -144,8 +146,48 @@ app = FastAPI(
         {"name": "Mídia", "description": "Upload e associação de arquivos binários (fotos, vídeos, documentos) a qualquer entidade."},
     ],
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+
+@app.middleware("http")
+async def log_debug_request(request: Request, call_next):
+    if settings.log_level.upper() != "DEBUG":
+        return await call_next(request)
+
+    started_at = perf_counter()
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        elapsed_ms = (perf_counter() - started_at) * 1000
+        safe_headers = {
+            name: ("[REDACTED]" if name.lower() in {
+                "authorization", "cookie", "set-cookie", "x-api-key",
+            } else value)
+            for name, value in request.headers.items()
+        }
+        logger.debug(
+            "http_request_debug",
+            method=request.method,
+            path=str(request.url.path),
+            query=dict(request.query_params),
+            headers=safe_headers,
+            status_code=response.status_code if response is not None else 500,
+            duration_ms=round(elapsed_ms, 2),
+        )
+
 if not hasattr(app.state, "engine"):
-    app.state.engine = criar_engine(settings.database_url)
+    app.state.engine = criar_engine(
+        settings.database_url,
+        echo=settings.sql_echo or settings.log_level.upper() == "DEBUG",
+    )
 if not hasattr(app.state, "identity_adapter"):
     app.state.identity_adapter = KeycloakIdentityAdapter(
         base_url=settings.keycloak_base_url,
@@ -355,6 +397,8 @@ class ServicoInput(BaseModel):
     )
     nome: str = Field(..., min_length=1)
     categoria: str = Field(..., min_length=1)
+    categorias: list[str] = Field(default_factory=list)
+    nome_servico_id: str | None = None
     duracao_base_minutos: int = Field(..., gt=0)
     preco_base: Decimal = Field(..., ge=0)
     profissional_id: str | None = None
@@ -375,6 +419,8 @@ class ServicoOutput(BaseModel):
     id: str
     nome: str
     categoria: str
+    categorias: list[str] = Field(default_factory=list)
+    nome_servico_id: str | None = None
     duracao_base_minutos: int
     preco_base: Decimal
     profissional_id: str | None = None
@@ -400,6 +446,15 @@ class PapelOutput(BaseModel):
     chave: str
     nome: str
     permissoes: list[str] = Field(default_factory=list)
+
+
+class NomeServicoInput(BaseModel):
+    nome: str = Field(..., min_length=1)
+
+
+class NomeServicoOutput(BaseModel):
+    id: str
+    nome: str
 
 
 class MembershipInput(BaseModel):
@@ -1133,6 +1188,10 @@ def servico_para_output(servico: Servico) -> ServicoOutput:
         id=str(servico.id),
         nome=servico.nome,
         categoria=servico.categoria,
+        categorias=list(servico.categorias),
+        nome_servico_id=(
+            str(servico.nome_servico_id) if servico.nome_servico_id else None
+        ),
         duracao_base_minutos=servico.duracao_base_minutos,
         preco_base=servico.preco_base,
         profissional_id=str(servico.profissional_id) if servico.profissional_id else None,
@@ -1453,6 +1512,7 @@ def buscar_servico_endpoint(servico_id: str) -> ServicoOutput:
     description="Busca serviços por categoria e, opcionalmente, por proximidade de um endereço.",
 )
 def descobrir_ofertas_endpoint(
+    termo: str | None = None,
     categoria: str | None = None,
     endereco: str | None = None,
     raio_km: Decimal | None = None,
@@ -1471,6 +1531,7 @@ def descobrir_ofertas_endpoint(
             geocodificacao,
             distancia,
         ).executar(
+            termo=termo,
             categoria=categoria,
             endereco=endereco,
             raio_km=raio_km,
@@ -1527,6 +1588,10 @@ def atualizar_servico_endpoint(
         id=servico.id,
         nome=payload.nome,
         categoria=payload.categoria,
+        categorias=tuple(payload.categorias),
+        nome_servico_id=(
+            uuid.UUID(payload.nome_servico_id) if payload.nome_servico_id else None
+        ),
         duracao_base_minutos=payload.duracao_base_minutos,
         preco_base=payload.preco_base,
         profissional_id=profissional_id,
@@ -2224,6 +2289,10 @@ def criar_servico_endpoint(
         id=uuid.uuid7(),
         nome=payload.nome,
         categoria=payload.categoria,
+        categorias=tuple(payload.categorias),
+        nome_servico_id=(
+            uuid.UUID(payload.nome_servico_id) if payload.nome_servico_id else None
+        ),
         duracao_base_minutos=payload.duracao_base_minutos,
         preco_base=payload.preco_base,
         profissional_id=profissional_id,
@@ -3746,6 +3815,101 @@ def atualizar_catalogo_status_endpoint(
             for item in atualizado.transicoes
         ],
     )
+
+
+def _nome_servico_para_output(nome_servico: NomeServico) -> NomeServicoOutput:
+    return NomeServicoOutput(id=str(nome_servico.id), nome=nome_servico.nome)
+
+
+@app.get(
+    "/catalogo/nomes-servico",
+    response_model=list[NomeServicoOutput],
+    tags=["Catálogos"],
+    dependencies=[Depends(limitar_endpoint_publico)],
+    summary="Lista nomes de serviço",
+    description="[Público, com rate limit] Lista nomes reutilizáveis do catálogo de serviços.",
+)
+def listar_nomes_servico_endpoint() -> list[NomeServicoOutput]:
+    return [
+        _nome_servico_para_output(item)
+        for item in NomeServicoRepository(app.state.engine).listar()
+    ]
+
+
+@app.get(
+    "/catalogo/nomes-servico/{nome_servico_id}",
+    response_model=NomeServicoOutput,
+    tags=["Catálogos"],
+    dependencies=[Depends(limitar_endpoint_publico)],
+    summary="Busca nome de serviço por ID",
+)
+def buscar_nome_servico_endpoint(nome_servico_id: str) -> NomeServicoOutput:
+    nome_servico = NomeServicoRepository(app.state.engine).buscar_por_id(
+        uuid.UUID(nome_servico_id)
+    )
+    if nome_servico is None:
+        raise HTTPException(status_code=404, detail="Nome de serviço não encontrado")
+    return _nome_servico_para_output(nome_servico)
+
+
+@app.post(
+    "/catalogo/nomes-servico",
+    response_model=NomeServicoOutput,
+    tags=["Catálogos"],
+    summary="Cria nome de serviço",
+)
+def criar_nome_servico_endpoint(
+    payload: NomeServicoInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> NomeServicoOutput:
+    repo = NomeServicoRepository(app.state.engine)
+    if repo.buscar_por_nome(payload.nome) is not None:
+        raise HTTPException(status_code=409, detail="nome de serviço já cadastrado")
+    nome_servico = NomeServico(id=uuid.uuid7(), nome=payload.nome)
+    return _nome_servico_para_output(repo.salvar(nome_servico))
+
+
+@app.put(
+    "/catalogo/nomes-servico/{nome_servico_id}",
+    response_model=NomeServicoOutput,
+    tags=["Catálogos"],
+    summary="Atualiza nome de serviço",
+)
+def atualizar_nome_servico_endpoint(
+    nome_servico_id: str,
+    payload: NomeServicoInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> NomeServicoOutput:
+    repo = NomeServicoRepository(app.state.engine)
+    nome_servico = repo.buscar_por_id(uuid.UUID(nome_servico_id))
+    if nome_servico is None:
+        raise HTTPException(status_code=404, detail="Nome de serviço não encontrado")
+    existente = repo.buscar_por_nome(payload.nome)
+    if existente is not None and existente.id != nome_servico.id:
+        raise HTTPException(status_code=409, detail="nome de serviço já cadastrado")
+    atualizado = NomeServico(id=nome_servico.id, nome=payload.nome)
+    return _nome_servico_para_output(repo.atualizar(atualizado))
+
+
+@app.delete(
+    "/catalogo/nomes-servico/{nome_servico_id}",
+    status_code=200,
+    tags=["Catálogos"],
+    summary="Remove nome de serviço",
+    description="Remove um nome somente quando ele não estiver sendo usado por um serviço.",
+)
+def remover_nome_servico_endpoint(
+    nome_servico_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> dict[str, str]:
+    repo = NomeServicoRepository(app.state.engine)
+    if repo.buscar_por_id(uuid.UUID(nome_servico_id)) is None:
+        raise HTTPException(status_code=404, detail="Nome de serviço não encontrado")
+    try:
+        repo.remover(uuid.UUID(nome_servico_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "deleted"}
 
 
 def _tipo_procedimento_para_output(tipo: TipoProcedimento) -> TipoProcedimentoOutput:

@@ -40,6 +40,8 @@ class Servico:
     categoria: str
     duracao_base_minutos: int
     preco_base: Decimal
+    nome_servico_id: uuid.UUID | None = None
+    categorias: tuple[str, ...] = field(default_factory=tuple)
     profissional_id: uuid.UUID | None = None
     organizacao_id: uuid.UUID | None = None
     tipo_procedimento_id: uuid.UUID | None = None
@@ -50,6 +52,10 @@ class Servico:
             raise ServicoInvalidoError("nome e obrigatorio")
         if not self.categoria.strip():
             raise ServicoInvalidoError("categoria e obrigatoria")
+        if not self.categorias:
+            object.__setattr__(self, "categorias", (self.categoria,))
+        elif self.categoria not in self.categorias:
+            object.__setattr__(self, "categorias", (self.categoria, *self.categorias))
         if self.duracao_base_minutos <= 0:
             raise ServicoInvalidoError("duracao base deve ser positiva")
         if self.preco_base < 0:

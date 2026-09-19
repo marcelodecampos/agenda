@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
 from agenda.domain.organizacao import Organizacao
 from agenda.domain.servico import Servico
 from agenda.ports import Coordenada, DistanciaPort, GeocodificacaoPort
+from agenda.application.busca_textual import corresponde_busca
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,7 @@ class DescobrirOfertas:
     def executar(
         self,
         *,
+        termo: str | None = None,
         categoria: str | None = None,
         endereco: str | None = None,
         raio_km: Decimal | None = None,
@@ -50,7 +51,10 @@ class DescobrirOfertas:
         }
         resultados: list[OfertaDescoberta] = []
         for servico in self.servicos.listar():
-            if categoria and servico.categoria.casefold() != categoria.casefold():
+            termo_busca = termo or categoria
+            if termo_busca and not corresponde_busca(
+                termo_busca, servico.nome, *servico.categorias
+            ):
                 continue
             organizacao = (
                 organizacoes.get(servico.organizacao_id)

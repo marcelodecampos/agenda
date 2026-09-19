@@ -53,6 +53,8 @@ Plataforma para agendar serviços diversos, aproximando clientes de profissionai
   - Nenhuma regra de disponibilidade deve ser fixa/hardcoded — tudo deve ser configurável pelo profissional (dias, horários, exceções, folgas, feriados que ele escolhe respeitar ou não).
 
 - **Atributos do Serviço (MVP)**: duração base, preço base, categoria.
+  - **Catálogo mínimo de serviços**: categorias e nomes de serviço serão entidades separadas, cada uma com `id` e `nome`. Uma tabela de ligação permitirá associar o mesmo nome de serviço a várias categorias. A entidade `Serviço` representará a oferta concreta de um profissional/estabelecimento e referenciará o nome de serviço por chave estrangeira.
+  - **Diretriz KISS**: não haverá tabela de aliases, sinônimos ou outra estrutura opcional de busca neste momento. Essa extensão só será modelada quando houver necessidade comprovada no uso real.
   - **Modalidade de atendimento não é uma ramificação de regra de negócio, é uma variação comercial do mesmo serviço**: local do atendimento (no estabelecimento vs. no endereço do cliente) não muda a natureza do serviço, só gera ajuste de preço e/ou duração.
   - **Modelo**: cada Serviço tem uma lista de modalidades de atendimento aceitas, cada uma com ajuste opcional de preço (fixo ou percentual) e ajuste opcional de duração.
   - **Ajuste de duração não é só deslocamento**: pode ser motivado por deslocamento do profissional, mas também por outros fatores (ex: falta de ferramenta/equipamento que existe no estabelecimento e precisa de tempo extra no atendimento domiciliar). Deve ser **totalmente configurável**, sem semântica fixa amarrada a "tempo de deslocamento".

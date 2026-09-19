@@ -9,9 +9,9 @@ class Base(DeclarativeBase):
     pass
 
 
-def criar_engine(database_url: str) -> object:
+def criar_engine(database_url: str, *, echo: bool = False) -> object:
     """Create the application engine from the configured database URL."""
-    return create_engine(database_url, pool_pre_ping=True)
+    return create_engine(database_url, pool_pre_ping=True, echo=echo)
 
 
 def criar_engine_sqlite_memoria() -> object:

@@ -6,8 +6,9 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8081
     environment: str = "development"
-    log_level: str = "INFO"
+    log_level: str = "DEBUG"
     log_format: str = "console"
+    sql_echo: bool = False
     keycloak_base_url: str = "http://localhost:8080"
     keycloak_realm: str = "agenda"
     nominatim_base_url: str = "https://nominatim.openstreetmap.org"

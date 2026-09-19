@@ -35,8 +35,45 @@ def test_criar_servico_persiste_servico() -> None:
     salvo = use_case.executar(servico)
     encontrado = repo.buscar_por_id(servico.id)
 
-    assert salvo == servico
-    assert encontrado == servico
+    assert salvo.nome == servico.nome
+    assert salvo.categorias == (servico.categoria,)
+    assert salvo.nome_servico_id is not None
+    assert encontrado is not None
+    assert encontrado.nome == servico.nome
+    assert encontrado.categorias == (servico.categoria,)
+    assert encontrado.nome_servico_id == salvo.nome_servico_id
+
+
+def test_nome_de_servico_pode_ter_varias_categorias() -> None:
+    engine = criar_engine_sqlite_memoria()
+    repo = ServicoRepository(engine)
+
+    primeiro = Servico(
+        id=novo_id(),
+        nome="Massagem",
+        categoria="bem-estar",
+        duracao_base_minutos=60,
+        preco_base=Decimal("100.00"),
+        organizacao_id=novo_id(),
+    )
+    segundo = Servico(
+        id=novo_id(),
+        nome="Massagem",
+        categoria="terapias",
+        duracao_base_minutos=60,
+        preco_base=Decimal("100.00"),
+        organizacao_id=novo_id(),
+    )
+
+    salvo_primeiro = repo.salvar(primeiro)
+    salvo_segundo = repo.salvar(segundo)
+    servicos = repo.listar()
+
+    assert salvo_primeiro.nome_servico_id == salvo_segundo.nome_servico_id
+    assert {categoria for servico in servicos for categoria in servico.categorias} == {
+        "bem-estar",
+        "terapias",
+    }
 
 
 def test_criar_pacote_persiste_pacote() -> None:

@@ -988,6 +988,42 @@ def test_catalogo_tipos_procedimento_crud_e_vinculo_com_servico() -> None:
     assert removido.status_code == 200
 
 
+def test_catalogo_nomes_servico_crud() -> None:
+    app.state.engine = criar_engine_sqlite_memoria()
+
+    criado = client.post(
+        "/catalogo/nomes-servico",
+        json={"nome": "Manicure"},
+    )
+    assert criado.status_code == 200
+    nome_id = criado.json()["id"]
+
+    duplicado = client.post(
+        "/catalogo/nomes-servico",
+        json={"nome": "Manicure"},
+    )
+    assert duplicado.status_code == 409
+
+    listado = client.get("/catalogo/nomes-servico")
+    assert listado.status_code == 200
+    assert listado.json() == [{"id": nome_id, "nome": "Manicure"}]
+
+    buscado = client.get(f"/catalogo/nomes-servico/{nome_id}")
+    assert buscado.status_code == 200
+    assert buscado.json()["nome"] == "Manicure"
+
+    atualizado = client.put(
+        f"/catalogo/nomes-servico/{nome_id}",
+        json={"nome": "Manicure tradicional"},
+    )
+    assert atualizado.status_code == 200
+    assert atualizado.json()["nome"] == "Manicure tradicional"
+
+    removido = client.delete(f"/catalogo/nomes-servico/{nome_id}")
+    assert removido.status_code == 200
+    assert client.get(f"/catalogo/nomes-servico/{nome_id}").status_code == 404
+
+
 def test_listar_servicos_endpoint() -> None:
     app.state.engine = criar_engine_sqlite_memoria()
 
