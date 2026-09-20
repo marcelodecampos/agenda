@@ -82,7 +82,7 @@ from agenda.domain.membership import Membership
 from agenda.domain.organizacao import Organizacao
 from agenda.domain.pacote import Pacote
 from agenda.domain.papel import Papel
-from agenda.domain.catalogo_servico import NomeServico
+from agenda.domain.catalogo_servico import CategoriaServico, NomeServico
 from agenda.domain.servico import ModalidadeAtendimento, Servico
 from agenda.domain.tipo_procedimento import TipoProcedimento
 from agenda.domain.media import AnexoMedia, Media
@@ -101,7 +101,11 @@ from agenda.infrastructure.membership_repository import MembershipRepository, Pa
 from agenda.infrastructure.notificacao_repository import NotificacaoAgendamentoRepository
 from agenda.infrastructure.organizacao_repository import OrganizacaoRepository
 from agenda.infrastructure.pacote_repository import PacoteRepository
-from agenda.infrastructure.servico_repository import NomeServicoRepository, ServicoRepository
+from agenda.infrastructure.servico_repository import (
+    CategoriaServicoRepository,
+    NomeServicoRepository,
+    ServicoRepository,
+)
 from agenda.infrastructure.status_agendamento_repository import CatalogoStatusRepository
 from agenda.infrastructure.tipo_procedimento_repository import TipoProcedimentoRepository
 from agenda.infrastructure.media_repository import AnexoMediaRepository, MediaRepository
@@ -453,6 +457,15 @@ class NomeServicoInput(BaseModel):
 
 
 class NomeServicoOutput(BaseModel):
+    id: str
+    nome: str
+
+
+class CategoriaServicoInput(BaseModel):
+    nome: str = Field(..., min_length=1)
+
+
+class CategoriaServicoOutput(BaseModel):
     id: str
     nome: str
 
@@ -3907,6 +3920,101 @@ def remover_nome_servico_endpoint(
         raise HTTPException(status_code=404, detail="Nome de serviço não encontrado")
     try:
         repo.remover(uuid.UUID(nome_servico_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "deleted"}
+
+
+def _categoria_servico_para_output(categoria: CategoriaServico) -> CategoriaServicoOutput:
+    return CategoriaServicoOutput(id=str(categoria.id), nome=categoria.nome)
+
+
+@app.get(
+    "/catalogo/categorias-servico",
+    response_model=list[CategoriaServicoOutput],
+    tags=["Catálogos"],
+    dependencies=[Depends(limitar_endpoint_publico)],
+    summary="Lista categorias de serviço",
+    description="[Público, com rate limit] Lista categorias reutilizáveis do catálogo de serviços.",
+)
+def listar_categorias_servico_endpoint() -> list[CategoriaServicoOutput]:
+    return [
+        _categoria_servico_para_output(item)
+        for item in CategoriaServicoRepository(app.state.engine).listar()
+    ]
+
+
+@app.get(
+    "/catalogo/categorias-servico/{categoria_id}",
+    response_model=CategoriaServicoOutput,
+    tags=["Catálogos"],
+    dependencies=[Depends(limitar_endpoint_publico)],
+    summary="Busca categoria de serviço por ID",
+)
+def buscar_categoria_servico_endpoint(categoria_id: str) -> CategoriaServicoOutput:
+    categoria = CategoriaServicoRepository(app.state.engine).buscar_por_id(
+        uuid.UUID(categoria_id)
+    )
+    if categoria is None:
+        raise HTTPException(status_code=404, detail="Categoria de serviço não encontrada")
+    return _categoria_servico_para_output(categoria)
+
+
+@app.post(
+    "/catalogo/categorias-servico",
+    response_model=CategoriaServicoOutput,
+    tags=["Catálogos"],
+    summary="Cria categoria de serviço",
+)
+def criar_categoria_servico_endpoint(
+    payload: CategoriaServicoInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> CategoriaServicoOutput:
+    repo = CategoriaServicoRepository(app.state.engine)
+    if repo.buscar_por_nome(payload.nome) is not None:
+        raise HTTPException(status_code=409, detail="categoria de serviço já cadastrada")
+    categoria = CategoriaServico(id=uuid.uuid7(), nome=payload.nome)
+    return _categoria_servico_para_output(repo.salvar(categoria))
+
+
+@app.put(
+    "/catalogo/categorias-servico/{categoria_id}",
+    response_model=CategoriaServicoOutput,
+    tags=["Catálogos"],
+    summary="Atualiza categoria de serviço",
+)
+def atualizar_categoria_servico_endpoint(
+    categoria_id: str,
+    payload: CategoriaServicoInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> CategoriaServicoOutput:
+    repo = CategoriaServicoRepository(app.state.engine)
+    categoria = repo.buscar_por_id(uuid.UUID(categoria_id))
+    if categoria is None:
+        raise HTTPException(status_code=404, detail="Categoria de serviço não encontrada")
+    existente = repo.buscar_por_nome(payload.nome)
+    if existente is not None and existente.id != categoria.id:
+        raise HTTPException(status_code=409, detail="categoria de serviço já cadastrada")
+    atualizada = CategoriaServico(id=categoria.id, nome=payload.nome)
+    return _categoria_servico_para_output(repo.atualizar(atualizada))
+
+
+@app.delete(
+    "/catalogo/categorias-servico/{categoria_id}",
+    status_code=200,
+    tags=["Catálogos"],
+    summary="Remove categoria de serviço",
+    description="Remove uma categoria somente quando ela não estiver vinculada a um nome de serviço.",
+)
+def remover_categoria_servico_endpoint(
+    categoria_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> dict[str, str]:
+    repo = CategoriaServicoRepository(app.state.engine)
+    if repo.buscar_por_id(uuid.UUID(categoria_id)) is None:
+        raise HTTPException(status_code=404, detail="Categoria de serviço não encontrada")
+    try:
+        repo.remover(uuid.UUID(categoria_id))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"status": "deleted"}

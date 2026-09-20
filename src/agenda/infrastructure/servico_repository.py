@@ -317,3 +317,60 @@ class NomeServicoRepository:
                 select(NomeServicoModel).where(NomeServicoModel.nome == nome)
             ).scalar_one_or_none()
             return row.to_domain() if row else None
+
+
+class CategoriaServicoRepository:
+    def __init__(self, engine: object) -> None:
+        self.engine = engine
+        Base.metadata.create_all(bind=engine)
+
+    def salvar(self, categoria: CategoriaServico) -> CategoriaServico:
+        with criar_session(self.engine) as session:
+            session.add(CategoriaServicoModel(id=str(categoria.id), nome=categoria.nome))
+            session.commit()
+        return categoria
+
+    def atualizar(self, categoria: CategoriaServico) -> CategoriaServico:
+        with criar_session(self.engine) as session:
+            session.merge(CategoriaServicoModel(id=str(categoria.id), nome=categoria.nome))
+            session.commit()
+        return categoria
+
+    def remover(self, id_: uuid.UUID) -> bool:
+        with criar_session(self.engine) as session:
+            row = session.execute(
+                select(CategoriaServicoModel).where(CategoriaServicoModel.id == str(id_))
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            usado = session.execute(
+                select(categoria_nome_servico.c.nome_servico_id)
+                .where(categoria_nome_servico.c.categoria_id == str(id_))
+                .limit(1)
+            ).scalar_one_or_none()
+            if usado is not None:
+                raise ValueError("categoria de servico esta sendo usada por um nome de servico")
+            session.delete(row)
+            session.commit()
+        return True
+
+    def listar(self) -> list[CategoriaServico]:
+        with criar_session(self.engine) as session:
+            rows = session.execute(
+                select(CategoriaServicoModel).order_by(CategoriaServicoModel.nome)
+            ).scalars().all()
+            return [row.to_domain() for row in rows]
+
+    def buscar_por_id(self, id_: uuid.UUID) -> CategoriaServico | None:
+        with criar_session(self.engine) as session:
+            row = session.execute(
+                select(CategoriaServicoModel).where(CategoriaServicoModel.id == str(id_))
+            ).scalar_one_or_none()
+            return row.to_domain() if row else None
+
+    def buscar_por_nome(self, nome: str) -> CategoriaServico | None:
+        with criar_session(self.engine) as session:
+            row = session.execute(
+                select(CategoriaServicoModel).where(CategoriaServicoModel.nome == nome)
+            ).scalar_one_or_none()
+            return row.to_domain() if row else None
