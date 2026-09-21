@@ -56,6 +56,30 @@ def corresponde_busca(termo: str, *campos: str) -> bool:
     return True
 
 
+def pontuar_busca(termo: str, texto: str) -> float:
+    """Calcula a relevância de um texto para a consulta normalizada."""
+    consulta = normalizar_texto(termo)
+    alvo = normalizar_texto(texto)
+    if not consulta or not alvo:
+        return 0.0
+    if consulta == alvo:
+        return 1.0
+    if alvo.startswith(consulta):
+        return 0.96
+    if consulta in alvo:
+        return 0.92
+
+    consulta_tokens = consulta.split()
+    alvo_tokens = alvo.split()
+    pontuacoes = [
+        max(_similaridade_token(token, alvo_token) for alvo_token in alvo_tokens)
+        for token in consulta_tokens
+    ]
+    if not pontuacoes:
+        return 0.0
+    return sum(pontuacoes) / len(pontuacoes)
+
+
 def _limiar(token: str) -> float:
     tamanho = len(token)
     if tamanho <= 3:

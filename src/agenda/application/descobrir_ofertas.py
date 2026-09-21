@@ -23,11 +23,13 @@ class DescobrirOfertas:
         organizacoes: object,
         geocodificacao: GeocodificacaoPort | None = None,
         distancia: DistanciaPort | None = None,
+        indice_busca: object | None = None,
     ) -> None:
         self.servicos = servicos
         self.organizacoes = organizacoes
         self.geocodificacao = geocodificacao
         self.distancia = distancia
+        self.indice_busca = indice_busca
 
     def executar(
         self,
@@ -50,8 +52,13 @@ class DescobrirOfertas:
             organizacao.id: organizacao for organizacao in self.organizacoes.listar()
         }
         resultados: list[OfertaDescoberta] = []
+        relevancias: dict[object, float] = {}
+        if termo and self.indice_busca is not None:
+            relevancias = self.indice_busca.buscar(termo)
         for servico in self.servicos.listar():
             termo_busca = termo or categoria
+            if termo and servico.nome_servico_id not in relevancias:
+                continue
             if termo_busca and not corresponde_busca(
                 termo_busca, servico.nome, *servico.categorias
             ):
@@ -80,9 +87,10 @@ class DescobrirOfertas:
             )
         return sorted(
             resultados,
-            key=lambda oferta: oferta.distancia_km
-            if oferta.distancia_km is not None
-            else Decimal("0"),
+            key=lambda oferta: (
+                -relevancias.get(oferta.servico.nome_servico_id, 0.0),
+                oferta.distancia_km if oferta.distancia_km is not None else Decimal("0"),
+            ),
         )
 
     @staticmethod

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from agenda.domain.exceptions import ErroDominio
 
@@ -24,6 +24,7 @@ class CategoriaServico:
 class NomeServico:
     id: uuid.UUID
     nome: str
+    categorias: tuple[CategoriaServico, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not self.nome.strip():

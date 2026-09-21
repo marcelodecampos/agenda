@@ -269,17 +269,22 @@ class NomeServicoRepository:
         self.engine = engine
         Base.metadata.create_all(bind=engine)
 
-    def salvar(self, nome_servico: NomeServico) -> NomeServico:
+    def salvar(self, nome_servico: NomeServico, categoria_ids: list[uuid.UUID] | None = None) -> NomeServico:
         with criar_session(self.engine) as session:
             session.add(NomeServicoModel(id=str(nome_servico.id), nome=nome_servico.nome))
+            session.flush()
+            if categoria_ids is not None:
+                self._substituir_categorias(session, str(nome_servico.id), categoria_ids)
             session.commit()
-        return nome_servico
+        return self.buscar_por_id(nome_servico.id) or nome_servico
 
-    def atualizar(self, nome_servico: NomeServico) -> NomeServico:
+    def atualizar(self, nome_servico: NomeServico, categoria_ids: list[uuid.UUID] | None = None) -> NomeServico:
         with criar_session(self.engine) as session:
             session.merge(NomeServicoModel(id=str(nome_servico.id), nome=nome_servico.nome))
+            if categoria_ids is not None:
+                self._substituir_categorias(session, str(nome_servico.id), categoria_ids)
             session.commit()
-        return nome_servico
+        return self.buscar_por_id(nome_servico.id) or nome_servico
 
     def remover(self, id_: uuid.UUID) -> bool:
         with criar_session(self.engine) as session:
@@ -302,21 +307,57 @@ class NomeServicoRepository:
             rows = session.execute(
                 select(NomeServicoModel).order_by(NomeServicoModel.nome)
             ).scalars().all()
-            return [row.to_domain() for row in rows]
+            return [self._to_domain(session, row) for row in rows]
 
     def buscar_por_id(self, id_: uuid.UUID) -> NomeServico | None:
         with criar_session(self.engine) as session:
             row = session.execute(
                 select(NomeServicoModel).where(NomeServicoModel.id == str(id_))
             ).scalar_one_or_none()
-            return row.to_domain() if row else None
+            return self._to_domain(session, row) if row else None
 
     def buscar_por_nome(self, nome: str) -> NomeServico | None:
         with criar_session(self.engine) as session:
             row = session.execute(
                 select(NomeServicoModel).where(NomeServicoModel.nome == nome)
             ).scalar_one_or_none()
-            return row.to_domain() if row else None
+            return self._to_domain(session, row) if row else None
+
+    @staticmethod
+    def _to_domain(session: object, row: NomeServicoModel) -> NomeServico:
+        categorias = tuple(
+            categoria
+            for categoria_id in session.execute(
+                select(categoria_nome_servico.c.categoria_id).where(
+                    categoria_nome_servico.c.nome_servico_id == row.id
+                )
+            ).scalars()
+            if (categoria := session.get(CategoriaServicoModel, categoria_id)) is not None
+        )
+        return NomeServico(
+            id=uuid.UUID(row.id),
+            nome=row.nome,
+            categorias=tuple(categoria.to_domain() for categoria in categorias),
+        )
+
+    @staticmethod
+    def _substituir_categorias(session: object, nome_id: str, categoria_ids: list[uuid.UUID]) -> None:
+        ids = [str(categoria_id) for categoria_id in dict.fromkeys(categoria_ids)]
+        categorias = session.execute(
+            select(CategoriaServicoModel).where(CategoriaServicoModel.id.in_(ids))
+        ).scalars().all()
+        if len(categorias) != len(ids):
+            raise ValueError("uma ou mais categorias de serviço não foram encontradas")
+        session.execute(
+            categoria_nome_servico.delete().where(
+                categoria_nome_servico.c.nome_servico_id == nome_id
+            )
+        )
+        if ids:
+            session.execute(
+                categoria_nome_servico.insert(),
+                [{"categoria_id": categoria_id, "nome_servico_id": nome_id} for categoria_id in ids],
+            )
 
 
 class CategoriaServicoRepository:

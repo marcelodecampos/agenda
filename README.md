@@ -46,6 +46,36 @@ com `wslc volume remove`.
 - Health check: `http://localhost:8081/health`.
 - Configuração do realm do Keycloak: ver [keycloak/import/README.md](keycloak/import/README.md).
 
+### Dados territoriais do IBGE
+
+O procedimento completo está em [docs/IMPORTACAO_DADOS_IBGE.md](docs/IMPORTACAO_DADOS_IBGE.md).
+
+As migrações criam os catálogos `unidades_federacao`, `municipios` e
+`localidades`. Os municípios são importados da [API de Localidades do
+IBGE](https://servicodados.ibge.gov.br/api/docs/localidades):
+
+```powershell
+poetry run python scripts/importar_localidades_ibge.py --municipios
+```
+
+As localidades selecionadas de 2010 podem ser importadas do arquivo
+`BR_Localidades_2010_v1.mdb`, disponível no [cadastro de localidades do
+IBGE](https://geoftp.ibge.gov.br/organizacao_do_territorio/estrutura_territorial/localidades/cadastro_de_localidades_selecionadas_2010/):
+
+```powershell
+poetry run python scripts/importar_localidades_ibge.py --localidades-mdb path/to/BR_Localidades_2010_v1.mdb
+```
+
+Também é possível usar o KML oficial, sem instalar GDAL/OGR:
+
+```powershell
+poetry run python scripts/importar_localidades_ibge.py --localidades-kml path/to/BR_Localidades_2010_v1.kml
+```
+
+O comando que usa MDB requer GDAL/OGR com suporte ao formato GeoMedia/Access
+(`ogrinfo` e `ogr2ogr`). As coordenadas são armazenadas em graus decimais,
+conforme o dicionário do IBGE, e o ano da fonte fica registrado como `2010`.
+
 ### Logs detalhados em desenvolvimento
 
 Para ver o SQL e os detalhes de cada requisição HTTP, execute a API com:

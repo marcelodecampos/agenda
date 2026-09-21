@@ -1,7 +1,8 @@
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from agenda.domain.endereco import Endereco
+from agenda.domain.especialidade import Especialidade
 from agenda.domain.exceptions import OrganizacaoInvalidaError
 
 
@@ -11,8 +12,11 @@ class Organizacao:
 
     id: uuid.UUID
     nome: str
+    nome_fantasia: str | None = None
+    cnpj: str | None = None
     unipessoal: bool = False
     endereco: Endereco | None = None
+    especialidades: tuple[Especialidade, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not self.nome.strip():

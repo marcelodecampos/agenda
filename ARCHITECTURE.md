@@ -131,6 +131,24 @@ pois um nome pode pertencer a varias categorias. `Servico` referencia
 modalidades da oferta concreta. Nao ha tabela de aliases ou sinonimos no MVP;
 essa extensao depende de necessidade comprovada.
 
+### 7.2 Endereco centralizado por cadastro
+
+Enderecos sao armazenados na tabela central `enderecos` e vinculados a um
+registro-raiz em `cadastros` por `cadastro_id`. Clientes e organizacoes usam o
+mesmo UUIDv7 como identificador do cadastro dono, permitindo uma FK real sem
+uma relacao polimorfica para varias tabelas.
+
+Consultas administrativas de endereco recebem o ID do cadastro dono em
+`/admin/cadastros/{cadastro_id}/endereco`; nao existe endpoint de consulta por
+`endereco_id`. UUIDv7 garante unicidade, mas autenticacao e autorizacao sao as
+responsaveis pela seguranca do acesso.
+
+A migração `0018_cadastros_enderecos` copia os endereços legados de clientes e
+organizações para a tabela central. A migração `0021_multiplos_enderecos`
+permite vários endereços por cadastro por meio de `cadastro_enderecos`, com
+tipo, ativo e indicação de endereço principal. Os campos antigos permanecem
+durante a transição para preservar compatibilidade dos contratos existentes.
+
 ### 8. Framework do frontend
 
 O frontend web do MVP usara Next.js, React e TypeScript. O Next.js sera responsavel pela experiencia web responsiva e pela base PWA, enquanto o FastAPI permanecera como backend e proprietario das regras de negocio.

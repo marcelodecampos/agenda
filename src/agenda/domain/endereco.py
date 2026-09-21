@@ -16,6 +16,9 @@ class Endereco:
     cidade: str
     estado: str
     cep: str
+    bairro: str | None = None
+    municipio_id: uuid.UUID | None = None
+    localidade_id: uuid.UUID | None = None
     latitude: Decimal | None = None
     longitude: Decimal | None = None
 

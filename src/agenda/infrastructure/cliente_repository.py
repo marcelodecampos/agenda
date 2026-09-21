@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from agenda.domain.endereco import Cliente, Endereco
 from agenda.infrastructure.db import Base, criar_session
+from agenda.infrastructure.endereco_repository import CadastroModel, obter_endereco, salvar_endereco
 
 
 class ClienteModel(Base):
@@ -24,6 +25,7 @@ class ClienteModel(Base):
     endereco_cidade: Mapped[str | None] = mapped_column(String, nullable=True)
     endereco_estado: Mapped[str | None] = mapped_column(String, nullable=True)
     endereco_cep: Mapped[str | None] = mapped_column(String, nullable=True)
+    endereco_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
     @classmethod
     def from_domain(cls, cliente: Cliente) -> "ClienteModel":
@@ -41,6 +43,7 @@ class ClienteModel(Base):
             endereco_cidade=endereco.cidade if endereco else None,
             endereco_estado=endereco.estado if endereco else None,
             endereco_cep=endereco.cep if endereco else None,
+            endereco_id=str(cliente.id) if endereco else None,
         )
 
     def to_domain(self) -> Cliente:
@@ -73,12 +76,18 @@ class ClienteRepository:
     def salvar(self, cliente: Cliente) -> Cliente:
         with criar_session(self.engine) as session:
             session.add(ClienteModel.from_domain(cliente))
+            session.merge(CadastroModel(id=str(cliente.id), tipo="cliente"))
+            if cliente.endereco:
+                salvar_endereco(session, str(cliente.id), cliente.endereco, municipio_id=str(cliente.endereco.municipio_id) if cliente.endereco.municipio_id else None)
             session.commit()
         return cliente
 
     def atualizar(self, cliente: Cliente) -> Cliente:
         with criar_session(self.engine) as session:
             session.merge(ClienteModel.from_domain(cliente))
+            session.merge(CadastroModel(id=str(cliente.id), tipo="cliente"))
+            if cliente.endereco:
+                salvar_endereco(session, str(cliente.id), cliente.endereco, municipio_id=str(cliente.endereco.municipio_id) if cliente.endereco.municipio_id else None)
             session.commit()
         return cliente
 
@@ -98,7 +107,16 @@ class ClienteRepository:
             row = session.execute(
                 select(ClienteModel).where(ClienteModel.id == str(id_))
             ).scalar_one_or_none()
-            return row.to_domain() if row else None
+            if row is None:
+                return None
+            endereco = obter_endereco(session, row.id)
+            if endereco is not None:
+                row.endereco_logradouro = endereco.logradouro
+                row.endereco_numero = endereco.numero
+                row.endereco_cidade = endereco.cidade
+                row.endereco_estado = endereco.estado
+                row.endereco_cep = endereco.cep
+            return row.to_domain()
 
     def listar(self) -> list[Cliente]:
         with criar_session(self.engine) as session:

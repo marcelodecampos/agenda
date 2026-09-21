@@ -58,6 +58,7 @@ O CRUD de `Nomes de Serviço` é o modelo para os próximos catálogos.
 - Relatórios devem seguir a mesma linguagem visual compacta, com filtros, totais e tabelas.
 - Relatórios devem respeitar o escopo do papel e da organização do usuário.
 - Evitar dashboards genéricos ou gráficos decorativos antes de existir uma necessidade operacional clara.
+- Os CRUDs territoriais usam paginação no servidor, com janela de 20 registros, busca e filtros relacionais; a administração nunca carrega todas as localidades no navegador.
 
 ## Critérios de manutenção
 

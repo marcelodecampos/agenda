@@ -247,6 +247,47 @@ def test_registrar_usuario_endpoint() -> None:
     assert payload["nome"] == "Maria Silva"
 
 
+def test_criar_organizacao_endpoint_exige_apenas_autenticacao() -> None:
+    app.state.engine = criar_engine_sqlite_memoria()
+    original_permission = app.dependency_overrides.pop(exigir_configurar_estabelecimento, None)
+    original_identity = app.dependency_overrides.get(identidade_autenticada)
+    app.dependency_overrides[identidade_autenticada] = lambda: IdentidadeExterna(
+        provider="keycloak",
+        subject="org-creator",
+        nome="Criador de Organização",
+    )
+    try:
+        response = client.post(
+            "/organizacoes",
+            json={
+                "nome": "Salão Bela",
+                "unipessoal": False,
+                "endereco": {
+                    "logradouro": "Rua das Flores",
+                    "numero": "100",
+                    "cidade": "São Paulo",
+                    "estado": "SP",
+                    "cep": "01000-000",
+                },
+            },
+        )
+    finally:
+        if original_permission is None:
+            app.dependency_overrides.pop(exigir_configurar_estabelecimento, None)
+        else:
+            app.dependency_overrides[exigir_configurar_estabelecimento] = original_permission
+        if original_identity is None:
+            app.dependency_overrides.pop(identidade_autenticada, None)
+        else:
+            app.dependency_overrides[identidade_autenticada] = original_identity
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["nome"] == "Salão Bela"
+    assert payload["unipessoal"] is False
+    assert payload["endereco"]["cidade"] == "São Paulo"
+
+
 def test_criar_organizacao_endpoint() -> None:
     app.state.engine = criar_engine_sqlite_memoria()
 
@@ -1018,6 +1059,92 @@ def test_catalogo_tipos_procedimento_crud_e_vinculo_com_servico() -> None:
     assert removido.status_code == 200
 
 
+def test_catalogo_especialidades_crud_endpoints() -> None:
+    app.state.engine = criar_engine_sqlite_memoria()
+
+    criado = client.post("/catalogo/especialidades", json={"nome": "Depilação"})
+    assert criado.status_code == 200
+    especialidade_id = criado.json()["id"]
+
+    duplicado = client.post("/catalogo/especialidades", json={"nome": "Depilação"})
+    assert duplicado.status_code == 409
+
+    listado = client.get("/catalogo/especialidades")
+    assert listado.status_code == 200
+    assert any(item["nome"] == "Depilação" for item in listado.json())
+
+    atualizado = client.put(
+        f"/catalogo/especialidades/{especialidade_id}",
+        json={"nome": "Depilação facial"},
+    )
+    assert atualizado.status_code == 200
+    assert atualizado.json()["nome"] == "Depilação facial"
+
+    removido = client.delete(f"/catalogo/especialidades/{especialidade_id}")
+    assert removido.status_code == 200
+    assert client.get(f"/catalogo/especialidades/{especialidade_id}").status_code == 404
+
+
+def test_organizacao_vincula_especialidades() -> None:
+    from agenda.domain.papel import Papel
+    from agenda.domain.usuario import Usuario
+    from agenda.infrastructure.membership_repository import PapelRepository
+    from agenda.infrastructure.usuario_repository import UsuarioRepository
+
+    app.state.engine = criar_engine_sqlite_memoria()
+    usuario = Usuario(
+        id=uuid.uuid7(),
+        provider="keycloak",
+        subject="profissional-especialista",
+        nome="Ana Estética",
+    )
+    UsuarioRepository(app.state.engine).salvar(usuario)
+    PapelRepository(app.state.engine).salvar(
+        Papel(
+            id=uuid.uuid7(),
+            chave="dono",
+            nome="Dono",
+            permissoes=frozenset({"estabelecimento.configurar_dados"}),
+        )
+    )
+
+    especialidades = [
+        client.post("/catalogo/especialidades", json={"nome": nome}).json()
+        for nome in ("Unhas", "Cílios")
+    ]
+    resposta = client.post(
+        "/organizacoes",
+        json={
+            "nome": "Studio Bela",
+            "unipessoal": False,
+            "especialidade_ids": [item["id"] for item in especialidades],
+        },
+    )
+
+    assert resposta.status_code == 200
+    assert [item["nome"] for item in resposta.json()["especialidades"]] == ["Cílios", "Unhas"]
+
+    identidade_anterior = app.dependency_overrides[identidade_autenticada]
+    app.dependency_overrides[identidade_autenticada] = lambda: IdentidadeExterna(
+        provider="keycloak",
+        subject="profissional-especialista",
+        nome="Ana Estética",
+    )
+    try:
+        profissional = client.post(
+            "/profissionais/independente",
+            json={
+                "nome": "Ana Estética",
+                "especialidade_ids": [especialidades[0]["id"]],
+            },
+        )
+    finally:
+        app.dependency_overrides[identidade_autenticada] = identidade_anterior
+
+    assert profissional.status_code == 200
+    assert [item["nome"] for item in profissional.json()["organizacao"]["especialidades"]] == ["Unhas"]
+
+
 def test_catalogo_nomes_servico_crud() -> None:
     app.state.engine = criar_engine_sqlite_memoria()
 
@@ -1052,6 +1179,133 @@ def test_catalogo_nomes_servico_crud() -> None:
     removido = client.delete(f"/catalogo/nomes-servico/{nome_id}")
     assert removido.status_code == 200
     assert client.get(f"/catalogo/nomes-servico/{nome_id}").status_code == 404
+
+
+def test_catalogo_nome_servico_vincula_categorias() -> None:
+    app.state.engine = criar_engine_sqlite_memoria()
+
+    categorias = [
+        client.post("/catalogo/categorias-servico", json={"nome": nome}).json()
+        for nome in ("Unhas", "Cuidados")
+    ]
+    nome = client.post(
+        "/catalogo/nomes-servico",
+        json={"nome": "Manicure", "categoria_ids": [item["id"] for item in categorias]},
+    )
+
+    assert nome.status_code == 200
+    assert [item["nome"] for item in nome.json()["categorias"]] == ["Unhas", "Cuidados"]
+
+    atualizado = client.put(
+        f"/catalogo/nomes-servico/{nome.json()['id']}",
+        json={"nome": "Manicure", "categoria_ids": [categorias[1]["id"]]},
+    )
+    assert [item["nome"] for item in atualizado.json()["categorias"]] == ["Cuidados"]
+
+    limpo = client.put(
+        f"/catalogo/nomes-servico/{nome.json()['id']}",
+        json={"nome": "Manicure", "categoria_ids": []},
+    )
+    assert "categorias" not in limpo.json()
+
+
+def test_crud_administrativo_territorial_com_paginacao_e_filtros() -> None:
+    app.state.engine = criar_engine_sqlite_memoria()
+
+    uf = client.post(
+        "/admin/unidades-federacao",
+        json={"codigo_ibge": "35", "nome": "São Paulo", "sigla": "SP"},
+    )
+    assert uf.status_code == 200
+    uf_id = uf.json()["id"]
+
+    municipio = client.post(
+        "/admin/municipios",
+        json={"codigo_ibge": "3550308", "nome": "São Paulo", "unidade_federacao_id": uf_id},
+    )
+    assert municipio.status_code == 200
+    municipio_id = municipio.json()["id"]
+
+    municipios = client.get(f"/admin/municipios?unidade_federacao_id={uf_id}&page_size=1")
+    assert municipios.json()["total"] == 1
+    assert municipios.json()["items"][0]["codigo_ibge"] == "3550308"
+    assert client.delete(f"/admin/municipios/{municipio_id}").status_code == 200
+    assert client.delete(f"/admin/unidades-federacao/{uf_id}").status_code == 200
+
+
+def test_consultar_cep_admin_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    app.state.engine = criar_engine_sqlite_memoria()
+
+    class Resposta:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {
+                "cep": "01001-000",
+                "logradouro": "Praça da Sé",
+                "bairro": "Sé",
+                "localidade": "São Paulo",
+                "uf": "SP",
+            }
+
+    monkeypatch.setattr("agenda.main.httpx.get", lambda *args, **kwargs: Resposta())
+    resposta = client.get("/admin/enderecos/cep/01001-000")
+
+    assert resposta.status_code == 200
+    assert resposta.json()["logradouro"] == "Praça da Sé"
+    assert resposta.json()["municipio"] == "São Paulo"
+
+
+def test_endereco_administrativo_e_consultado_pelo_id_do_cadastro() -> None:
+    app.state.engine = criar_engine_sqlite_memoria()
+    criado = client.post(
+        "/organizacoes",
+        json={
+            "nome": "Studio Central",
+            "unipessoal": True,
+            "endereco": {
+                "logradouro": "Rua A",
+                "numero": "10",
+                "cidade": "São Paulo",
+                "estado": "SP",
+                "cep": "01000-000",
+            },
+        },
+    )
+    assert criado.status_code == 200
+    cadastro_id = criado.json()["id"]
+
+    endereco = client.get(f"/admin/cadastros/{cadastro_id}/endereco")
+
+    assert endereco.status_code == 200
+    assert endereco.json()["logradouro"] == "Rua A"
+    assert client.get(f"/admin/enderecos/{cadastro_id}").status_code == 404
+
+
+def test_descoberta_fuzzy_por_nome_de_servico_e_recarrega_cache() -> None:
+    app.state.engine = criar_engine_sqlite_memoria()
+    profissional_id = uuid.uuid7()
+
+    criado = client.post(
+        "/servicos",
+        json={
+            "nome": "Massagem Relaxante",
+            "categoria": "Bem-estar",
+            "duracao_base_minutos": 60,
+            "preco_base": "150.00",
+            "profissional_id": str(profissional_id),
+        },
+    )
+    assert criado.status_code == 200
+
+    busca = client.get("/descoberta", params={"termo": "massajem relaxante"})
+    assert busca.status_code == 200
+    assert busca.json()[0]["servico"]["nome"] == "Massagem Relaxante"
+
+    recarga = client.post("/busca/cache/recarregar")
+    assert recarga.status_code == 200
+    assert recarga.json()["nomes_indexados"] == 1
 
 
 def test_listar_servicos_endpoint() -> None:

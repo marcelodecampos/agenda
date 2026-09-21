@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from threading import Lock
 from time import monotonic, perf_counter
+from types import SimpleNamespace
+from typing import AsyncIterator
 
 import structlog
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from sqlalchemy import select
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from sqlalchemy.exc import IntegrityError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -19,7 +24,7 @@ from agenda.application.relatorio_comissao import gerar_relatorio_comissao
 from agenda.application.criar_agendamento import CriarAgendamento
 from agenda.application.criar_disponibilidade import CriarDisponibilidade
 from agenda.application.descobrir_ofertas import DescobrirOfertas
-from agenda.application.criar_lembrete_notificacao import CriarLembreteNotificacao
+from agenda.application.indice_busca import IndiceBuscaNomesServico
 from agenda.application.criar_membership import CriarMembership
 from agenda.application.criar_notificacao_agendamento import CriarNotificacaoAgendamento
 from agenda.application.criar_organizacao import CriarOrganizacao
@@ -34,7 +39,6 @@ from agenda.application.consultar_operacao import (
     construir_ficha,
 )
 from agenda.application.consultar_horarios_livres import ConsultarHorariosLivres
-from agenda.application.registrar_atendimento_fidelidade import RegistrarAtendimentoFidelidade
 from agenda.application.registrar_fidelidade_agendamento import RegistrarFidelidadeAgendamento
 from agenda.application.resgatar_fidelidade import ResgatarFidelidade
 from agenda.application.registrar_progresso_fidelidade import RegistrarProgressoFidelidade
@@ -65,17 +69,16 @@ from agenda.domain.comissao import RegraComissao
 from agenda.domain.disponibilidade import Disponibilidade, ExcecaoAgenda, IntervaloHorario, JanelaSemanal
 from agenda.domain.endereco import Endereco
 from agenda.domain.endereco import Cliente
+from agenda.domain.especialidade import Especialidade
 from agenda.domain.exceptions import (
     AgendamentoInvalidoError,
     FidelidadeInvalidaError,
     TransicaoAgendamentoNaoPermitidaError,
 )
 from agenda.domain.fidelidade import (
-    AplicacaoRecompensa,
     ProgramaFidelidade,
     ProgressoFidelidade,
     RecompensaFidelidade,
-    aplicar_recompensa,
 )
 from agenda.domain.lembrete import ConfiguracaoLembrete, LembreteInvalidoError
 from agenda.domain.membership import Membership
@@ -85,13 +88,14 @@ from agenda.domain.papel import Papel
 from agenda.domain.catalogo_servico import CategoriaServico, NomeServico
 from agenda.domain.servico import ModalidadeAtendimento, Servico
 from agenda.domain.tipo_procedimento import TipoProcedimento
-from agenda.domain.media import AnexoMedia, Media
+from agenda.domain.media import Media
 from agenda.domain.usuario import Usuario
 from agenda.infrastructure.agendamento_repository import AgendamentoRepository
 from agenda.infrastructure.cliente_repository import ClienteRepository
 from agenda.infrastructure.comissao_repository import RegraComissaoRepository
-from agenda.infrastructure.db import criar_engine
+from agenda.infrastructure.db import criar_engine, criar_session
 from agenda.infrastructure.disponibilidade_repository import DisponibilidadeRepository
+from agenda.infrastructure.especialidade_repository import EspecialidadeRepository
 from agenda.infrastructure.fidelidade_repository import (
     ProgramaFidelidadeRepository,
     ProgressoFidelidadeRepository,
@@ -109,14 +113,38 @@ from agenda.infrastructure.servico_repository import (
 from agenda.infrastructure.status_agendamento_repository import CatalogoStatusRepository
 from agenda.infrastructure.tipo_procedimento_repository import TipoProcedimentoRepository
 from agenda.infrastructure.media_repository import AnexoMediaRepository, MediaRepository
+from agenda.infrastructure.localidade_repository import (
+    LocalidadeRepository,
+    MunicipioModel,
+    UnidadeFederacaoModel,
+    novo_catalogo_id,
+)
+from agenda.infrastructure.endereco_repository import CadastroEnderecoModel, CadastroModel, EnderecoModel, criar_endereco, obter_endereco
 from agenda.infrastructure.usuario_repository import UsuarioRepository
 from agenda.logging import configure_logging
-from agenda.ports import DestinatarioNotificacao
+from agenda.ports import DestinatarioNotificacao, IdentidadeExterna
 
 
 configure_logging(settings.log_level, settings.log_format)
 logger = structlog.get_logger(__name__)
 bearer_scheme = HTTPBearer(auto_error=False)
+indice_busca_nomes = IndiceBuscaNomesServico()
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    nomes_servico = NomeServicoRepository(application.state.engine).listar()
+    categorias_servico = CategoriaServicoRepository(application.state.engine).listar()
+    indice_busca_nomes.recarregar(application.state.engine, nomes_servico)
+    logger.info(
+        "cache_inicializado",
+        tabelas={
+            "nomes_servico": len(nomes_servico),
+            "categorias_servico": len(categorias_servico),
+        },
+        registros_cache=indice_busca_nomes.quantidade,
+    )
+    yield
 
 app = FastAPI(
     title="Agenda API",
@@ -134,6 +162,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    lifespan=lifespan,
     openapi_tags=[
         {"name": "Health", "description": "Endpoints de saúde e verificação do serviço."},
         {"name": "Usuários", "description": "Cadastro e consulta de usuários do sistema."},
@@ -147,6 +176,7 @@ app = FastAPI(
         {"name": "Notificações", "description": "Geração de lembretes e notificações de agendamento."},
         {"name": "Comissão", "description": "Cálculo de comissão com base em regras e status do agendamento."},
         {"name": "Catálogos", "description": "Catálogos administráveis: papéis, status de agendamento e tipos de procedimento."},
+        {"name": "Administração", "description": "CRUDs administrativos de unidades federativas, municípios e localidades."},
         {"name": "Mídia", "description": "Upload e associação de arquivos binários (fotos, vídeos, documentos) a qualquer entidade."},
     ],
 )
@@ -300,6 +330,12 @@ class EnderecoInput(BaseModel):
     cidade: str = Field(..., min_length=1)
     estado: str = Field(..., min_length=1)
     cep: str = Field(..., min_length=1)
+    bairro: str | None = None
+    unidade_federacao_id: str | None = None
+    municipio_id: str | None = None
+    tipo: str = Field(default="principal", min_length=1, max_length=40)
+    descricao: str = Field(default="Matriz", min_length=1, max_length=40)
+    principal: bool = False
 
 
 class EnderecoOutput(BaseModel):
@@ -308,6 +344,45 @@ class EnderecoOutput(BaseModel):
     cidade: str
     estado: str
     cep: str
+    bairro: str | None = None
+    municipio_id: str | None = None
+    tipo: str = "principal"
+    descricao: str = "Matriz"
+    principal: bool = False
+
+
+SIGLAS_UF_POR_NOME = {
+    "acre": "AC", "alagoas": "AL", "amapá": "AP", "amapa": "AP",
+    "amazonas": "AM", "bahia": "BA", "ceará": "CE", "ceara": "CE",
+    "distrito federal": "DF", "espírito santo": "ES", "espirito santo": "ES",
+    "goiás": "GO", "goias": "GO", "maranhão": "MA", "maranhao": "MA",
+    "mato grosso": "MT", "mato grosso do sul": "MS", "minas gerais": "MG",
+    "pará": "PA", "para": "PA", "paraíba": "PB", "paraiba": "PB",
+    "paraná": "PR", "parana": "PR", "pernambuco": "PE", "piauí": "PI",
+    "piaui": "PI", "rio de janeiro": "RJ", "rio grande do norte": "RN",
+    "rio grande do sul": "RS", "rondônia": "RO", "rondonia": "RO",
+    "roraima": "RR", "santa catarina": "SC", "são paulo": "SP",
+    "sao paulo": "SP", "sergipe": "SE", "tocantins": "TO",
+}
+
+
+def normalizar_uf(estado: str) -> str:
+    valor = estado.strip()
+    if len(valor) == 2:
+        return valor.upper()
+    return SIGLAS_UF_POR_NOME.get(valor.casefold(), valor.upper())
+
+
+def _endereco_from_input(payload: EnderecoInput) -> Endereco:
+    return Endereco(
+        logradouro=payload.logradouro,
+        numero=payload.numero,
+        cidade=payload.cidade,
+        estado=normalizar_uf(payload.estado),
+        cep=payload.cep,
+        bairro=payload.bairro,
+        municipio_id=uuid.UUID(payload.municipio_id) if payload.municipio_id else None,
+    )
 
 
 class ClienteInput(BaseModel):
@@ -342,24 +417,79 @@ class OrganizacaoInput(BaseModel):
                     "estado": "SP",
                     "cep": "01000-000",
                 },
+                "especialidade_ids": ["0190a7b0-7f4d-7000-8000-000000000010"],
             }
         }
     )
     nome: str = Field(..., min_length=1)
+    nome_fantasia: str | None = Field(default=None, min_length=1)
+    cnpj: str | None = Field(default=None, pattern=r"^\d{14}$")
     unipessoal: bool = False
     endereco: EnderecoInput | None = None
+    especialidade_ids: list[str] = Field(default_factory=list)
+
+
+class EspecialidadeInput(BaseModel):
+    nome: str = Field(..., min_length=1)
+
+
+class UnidadeFederacaoInput(BaseModel):
+    codigo_ibge: str = Field(..., min_length=2, max_length=2, pattern=r"^\d{2}$")
+    nome: str = Field(..., min_length=1)
+    sigla: str = Field(..., min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$")
+
+
+class MunicipioInput(BaseModel):
+    codigo_ibge: str = Field(..., min_length=7, max_length=7, pattern=r"^\d{7}$")
+    nome: str = Field(..., min_length=1)
+    unidade_federacao_id: str = Field(..., min_length=1)
+
+
+class ConsultaCepOutput(BaseModel):
+    cep: str
+    logradouro: str = ""
+    complemento: str = ""
+    bairro: str = ""
+    municipio: str = ""
+    uf: str = ""
+    localidade: str = ""
+    erro: bool = False
+
+
+class SugestaoUfOutput(BaseModel):
+    id: str
+    codigo_ibge: str
+    nome: str
+    sigla: str
+
+
+class PaginaAdminOutput(BaseModel):
+    items: list[dict]
+    page: int
+    page_size: int
+    total: int
+    pages: int
+
+
+class EspecialidadeOutput(BaseModel):
+    id: str
+    nome: str
 
 
 class OrganizacaoOutput(BaseModel):
     id: str
     nome: str
+    nome_fantasia: str | None = None
+    cnpj: str | None = None
     unipessoal: bool
     endereco: EnderecoOutput | None = None
+    especialidades: list[EspecialidadeOutput] = Field(default_factory=list)
 
 
 class ProfissionalIndependenteInput(BaseModel):
     nome: str = Field(..., min_length=1)
     endereco: EnderecoInput | None = None
+    especialidade_ids: list[str] = Field(default_factory=list)
 
 
 class ModalidadeInput(BaseModel):
@@ -454,11 +584,7 @@ class PapelOutput(BaseModel):
 
 class NomeServicoInput(BaseModel):
     nome: str = Field(..., min_length=1)
-
-
-class NomeServicoOutput(BaseModel):
-    id: str
-    nome: str
+    categoria_ids: list[str] = Field(default_factory=list)
 
 
 class CategoriaServicoInput(BaseModel):
@@ -468,6 +594,12 @@ class CategoriaServicoInput(BaseModel):
 class CategoriaServicoOutput(BaseModel):
     id: str
     nome: str
+
+
+class NomeServicoOutput(BaseModel):
+    id: str
+    nome: str
+    categorias: list[CategoriaServicoOutput] | None = None
 
 
 class MembershipInput(BaseModel):
@@ -1017,6 +1149,12 @@ def exigir_acesso_organizacao(
     memberships = MembershipRepository(app.state.engine).listar_por_usuario_id(
         usuario.id
     )
+    if any(
+        membership.organizacao_id is None
+        and membership.tem_permissao("plataforma.gerenciar_catalogos")
+        for membership in memberships
+    ):
+        return
     if not any(
         membership.organizacao_id == organizacao_id
         and membership.tem_permissao(permissao)
@@ -1070,12 +1208,41 @@ exigir_configurar_estabelecimento = exigir_permissao(
     "estabelecimento.configurar_dados"
 )
 exigir_gerenciar_equipe = exigir_permissao("estabelecimento.gerenciar_equipe")
+
+
+def exigir_configurar_estabelecimento_ou_admin(
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> IdentidadeExterna:
+    usuario = UsuarioRepository(app.state.engine).buscar_por_provider_subject(
+        identidade.provider, identidade.subject
+    )
+    if usuario is None:
+        raise HTTPException(status_code=403, detail="identidade externa sem usuario interno")
+    memberships = MembershipRepository(app.state.engine).listar_por_usuario_id(usuario.id)
+    if any(
+        membership.tem_permissao("estabelecimento.configurar_dados")
+        or (
+            membership.organizacao_id is None
+            and membership.tem_permissao("plataforma.gerenciar_catalogos")
+        )
+        for membership in memberships
+    ):
+        return identidade
+    raise HTTPException(status_code=403, detail="permissao obrigatoria: estabelecimento.configurar_dados")
 exigir_gerenciar_pacote = exigir_permissao("pacote.gerenciar")
 exigir_configurar_agenda = exigir_permissao("agenda.configurar")
 exigir_solicitar_agendamento = exigir_permissao("agendamento.solicitar")
 exigir_configurar_fidelidade = exigir_permissao("fidelidade.configurar_programa")
 exigir_configurar_comissao = exigir_permissao("comissao.configurar_regra")
 exigir_gerenciar_catalogos = exigir_permissao("plataforma.gerenciar_catalogos")
+
+
+def _indice_busca_atualizado() -> IndiceBuscaNomesServico:
+    indice_busca_nomes.garantir_atualizado(
+        app.state.engine,
+        NomeServicoRepository(app.state.engine).listar(),
+    )
+    return indice_busca_nomes
 
 
 @app.get(
@@ -1155,10 +1322,19 @@ def usuario_para_output(usuario: Usuario) -> UsuarioOutput:
     )
 
 
+def especialidade_para_output(especialidade: Especialidade) -> EspecialidadeOutput:
+    return EspecialidadeOutput(
+        id=str(especialidade.id),
+        nome=especialidade.nome,
+    )
+
+
 def organizacao_para_output(organizacao: Organizacao) -> OrganizacaoOutput:
     return OrganizacaoOutput(
         id=str(organizacao.id),
         nome=organizacao.nome,
+        nome_fantasia=organizacao.nome_fantasia,
+        cnpj=organizacao.cnpj,
         unipessoal=organizacao.unipessoal,
         endereco=(
             EnderecoOutput(
@@ -1167,10 +1343,16 @@ def organizacao_para_output(organizacao: Organizacao) -> OrganizacaoOutput:
                 cidade=organizacao.endereco.cidade,
                 estado=organizacao.endereco.estado,
                 cep=organizacao.endereco.cep,
+                bairro=organizacao.endereco.bairro,
+                municipio_id=str(organizacao.endereco.municipio_id) if organizacao.endereco.municipio_id else None,
             )
             if organizacao.endereco is not None
             else None
         ),
+        especialidades=[
+            especialidade_para_output(item)
+            for item in sorted(organizacao.especialidades, key=lambda item: item.nome)
+        ],
     )
 
 
@@ -1189,6 +1371,8 @@ def cliente_para_output(cliente: Cliente) -> ClienteOutput:
                 cidade=cliente.endereco.cidade,
                 estado=cliente.endereco.estado,
                 cep=cliente.endereco.cep,
+                bairro=cliente.endereco.bairro,
+                municipio_id=str(cliente.endereco.municipio_id) if cliente.endereco.municipio_id else None,
             )
             if cliente.endereco is not None
             else None
@@ -1370,6 +1554,7 @@ def atualizar_usuario_endpoint(usuario_id: str, payload: UsuarioInput) -> Usuari
         telefone=payload.telefone,
     )
     salvo = repo.atualizar(atualizado)
+    indice_busca_nomes.invalidar()
     return usuario_para_output(salvo)
 
 
@@ -1422,14 +1607,14 @@ def buscar_organizacao_endpoint(organizacao_id: str) -> OrganizacaoOutput:
     "/organizacoes/{organizacao_id}",
     response_model=OrganizacaoOutput,
     tags=["Organizações"],
-    dependencies=[Depends(exigir_configurar_estabelecimento)],
+    dependencies=[Depends(exigir_configurar_estabelecimento_ou_admin)],
     summary="Atualiza organização",
     description="Atualiza os dados cadastrais e o endereço de uma organização.",
 )
 def atualizar_organizacao_endpoint(
     organizacao_id: str,
     payload: OrganizacaoInput,
-    identidade: IdentidadeExterna = Depends(exigir_configurar_estabelecimento),
+    identidade: IdentidadeExterna = Depends(exigir_configurar_estabelecimento_ou_admin),
 ) -> OrganizacaoOutput:
     repo = OrganizacaoRepository(app.state.engine)
     organizacao_uuid = uuid.UUID(organizacao_id)
@@ -1444,17 +1629,12 @@ def atualizar_organizacao_endpoint(
 
     endereco = None
     if payload.endereco is not None:
-        endereco = Endereco(
-            logradouro=payload.endereco.logradouro,
-            numero=payload.endereco.numero,
-            cidade=payload.endereco.cidade,
-            estado=payload.endereco.estado,
-            cep=payload.endereco.cep,
-        )
+        endereco = _endereco_from_input(payload.endereco)
 
     atualizado = Organizacao(
         id=organizacao.id,
         nome=payload.nome,
+        cnpj=payload.cnpj,
         unipessoal=payload.unipessoal,
         endereco=endereco,
     )
@@ -1466,13 +1646,13 @@ def atualizar_organizacao_endpoint(
     "/organizacoes/{organizacao_id}",
     status_code=200,
     tags=["Organizações"],
-    dependencies=[Depends(exigir_configurar_estabelecimento)],
+    dependencies=[Depends(exigir_configurar_estabelecimento_ou_admin)],
     summary="Remove organização",
     description="Remove uma organização do cadastro após validação do identificador.",
 )
 def remover_organizacao_endpoint(
     organizacao_id: str,
-    identidade: IdentidadeExterna = Depends(exigir_configurar_estabelecimento),
+    identidade: IdentidadeExterna = Depends(exigir_configurar_estabelecimento_ou_admin),
 ) -> dict[str, str]:
     repo = OrganizacaoRepository(app.state.engine)
     organizacao_uuid = uuid.UUID(organizacao_id)
@@ -1543,6 +1723,7 @@ def descobrir_ofertas_endpoint(
             OrganizacaoRepository(app.state.engine),
             geocodificacao,
             distancia,
+            _indice_busca_atualizado(),
         ).executar(
             termo=termo,
             categoria=categoria,
@@ -1563,6 +1744,23 @@ def descobrir_ofertas_endpoint(
         )
         for oferta in ofertas
     ]
+
+
+@app.post(
+    "/busca/cache/recarregar",
+    response_model=dict[str, int],
+    tags=["Busca"],
+    summary="Recarrega o cache de busca",
+    description="Reconstrói o índice em memória dos nomes de serviço.",
+)
+def recarregar_cache_busca_endpoint(
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> dict[str, int]:
+    quantidade = indice_busca_nomes.recarregar(
+        app.state.engine,
+        NomeServicoRepository(app.state.engine).listar(),
+    )
+    return {"nomes_indexados": quantidade}
 
 
 @app.put(
@@ -1671,13 +1869,7 @@ def criar_cliente_endpoint(
         raise HTTPException(status_code=403, detail="identidade externa sem usuario interno")
     endereco = None
     if payload.endereco is not None:
-        endereco = Endereco(
-            payload.endereco.logradouro,
-            payload.endereco.numero,
-            payload.endereco.cidade,
-            payload.endereco.estado,
-            payload.endereco.cep,
-        )
+        endereco = _endereco_from_input(payload.endereco)
     cliente = Cliente(
         id=uuid.uuid7(),
         nome=payload.nome,
@@ -1763,13 +1955,7 @@ def atualizar_cliente_endpoint(
         raise HTTPException(status_code=403, detail="cliente fora do escopo do usuario")
     endereco = None
     if payload.endereco is not None:
-        endereco = Endereco(
-            payload.endereco.logradouro,
-            payload.endereco.numero,
-            payload.endereco.cidade,
-            payload.endereco.estado,
-            payload.endereco.cep,
-        )
+        endereco = _endereco_from_input(payload.endereco)
     atualizado = Cliente(
         id=existente.id,
         nome=payload.nome,
@@ -2126,40 +2312,47 @@ def criar_usuario_endpoint(payload: UsuarioInput) -> UsuarioOutput:
     "/organizacoes",
     response_model=OrganizacaoOutput,
     tags=["Organizações"],
-    dependencies=[Depends(exigir_configurar_estabelecimento)],
     summary="Cria organização",
-    description="Cria uma nova organização com nome, tipo e endereço opcional.",
+    description=(
+        "Cria uma nova organização para a identidade autenticada. "
+        "A criação não exige um membership prévio, porque a organização ainda não existe."
+    ),
 )
-def criar_organizacao_endpoint(payload: OrganizacaoInput) -> OrganizacaoOutput:
+def criar_organizacao_endpoint(
+    payload: OrganizacaoInput,
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> OrganizacaoOutput:
+    del identidade
     repo = OrganizacaoRepository(app.state.engine)
     use_case = CriarOrganizacao(repo)
     endereco = None
     if payload.endereco is not None:
-        endereco = Endereco(
-            logradouro=payload.endereco.logradouro,
-            numero=payload.endereco.numero,
-            cidade=payload.endereco.cidade,
-            estado=payload.endereco.estado,
-            cep=payload.endereco.cep,
-        )
-    organizacao = Organizacao(id=uuid.uuid7(), nome=payload.nome, unipessoal=payload.unipessoal, endereco=endereco)
-    salvo = use_case.executar(organizacao)
-    return OrganizacaoOutput(
-        id=str(salvo.id),
-        nome=salvo.nome,
-        unipessoal=salvo.unipessoal,
-        endereco=(
-            EnderecoOutput(
-                logradouro=salvo.endereco.logradouro,
-                numero=salvo.endereco.numero,
-                cidade=salvo.endereco.cidade,
-                estado=salvo.endereco.estado,
-                cep=salvo.endereco.cep,
-            )
-            if salvo.endereco is not None
-            else None
-        ),
+        endereco = _endereco_from_input(payload.endereco)
+    organizacao = Organizacao(
+        id=uuid.uuid7(),
+        nome=payload.nome,
+        cnpj=payload.cnpj,
+        unipessoal=payload.unipessoal,
+        endereco=endereco,
     )
+    try:
+        salvo = use_case.executar(organizacao)
+        especialidade_ids = [uuid.UUID(item) for item in payload.especialidade_ids]
+        if especialidade_ids:
+            salvo = repo.atualizar(
+                Organizacao(
+                    id=salvo.id,
+                    nome=salvo.nome,
+                    cnpj=salvo.cnpj,
+                    unipessoal=salvo.unipessoal,
+                    endereco=salvo.endereco,
+                    especialidades=salvo.especialidades,
+                ),
+                especialidade_ids,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return organizacao_para_output(salvo)
 
 
 @app.post(
@@ -2195,16 +2388,11 @@ def criar_profissional_independente_endpoint(
 
     endereco = None
     if payload.endereco is not None:
-        endereco = Endereco(
-            logradouro=payload.endereco.logradouro,
-            numero=payload.endereco.numero,
-            cidade=payload.endereco.cidade,
-            estado=payload.endereco.estado,
-            cep=payload.endereco.cep,
-        )
+        endereco = _endereco_from_input(payload.endereco)
 
+    repo = OrganizacaoRepository(app.state.engine)
     perfil = CriarProfissionalIndependente(
-        OrganizacaoRepository(app.state.engine),
+        repo,
         MembershipRepository(app.state.engine),
     ).executar(
         usuario_id=usuario.id,
@@ -2212,6 +2400,25 @@ def criar_profissional_independente_endpoint(
         papel_dono=papel_dono,
         endereco=endereco,
     )
+    try:
+        especialidade_ids = [uuid.UUID(item) for item in payload.especialidade_ids]
+        if especialidade_ids:
+            organizacao_atualizada = repo.atualizar(
+                Organizacao(
+                    id=perfil.organizacao.id,
+                    nome=perfil.organizacao.nome,
+                    unipessoal=perfil.organizacao.unipessoal,
+                    endereco=perfil.organizacao.endereco,
+                    especialidades=perfil.organizacao.especialidades,
+                ),
+                especialidade_ids,
+            )
+            perfil = SimpleNamespace(
+                organizacao=organizacao_atualizada,
+                membership=perfil.membership,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ProfissionalIndependenteOutput(
         organizacao=organizacao_para_output(perfil.organizacao),
         membership=membership_para_output(perfil.membership),
@@ -2254,16 +2461,11 @@ def criar_organizacao_com_equipe_endpoint(
 
     endereco = None
     if payload.endereco is not None:
-        endereco = Endereco(
-            logradouro=payload.endereco.logradouro,
-            numero=payload.endereco.numero,
-            cidade=payload.endereco.cidade,
-            estado=payload.endereco.estado,
-            cep=payload.endereco.cep,
-        )
+        endereco = _endereco_from_input(payload.endereco)
 
+    repo = OrganizacaoRepository(app.state.engine)
     perfil = CriarOrganizacaoComEquipe(
-        OrganizacaoRepository(app.state.engine),
+        repo,
         MembershipRepository(app.state.engine),
     ).executar(
         usuario_id=usuario.id,
@@ -2271,6 +2473,25 @@ def criar_organizacao_com_equipe_endpoint(
         papel_dono=papel_dono,
         endereco=endereco,
     )
+    try:
+        especialidade_ids = [uuid.UUID(item) for item in payload.especialidade_ids]
+        if especialidade_ids:
+            organizacao_atualizada = repo.atualizar(
+                Organizacao(
+                    id=perfil.organizacao.id,
+                    nome=perfil.organizacao.nome,
+                    unipessoal=perfil.organizacao.unipessoal,
+                    endereco=perfil.organizacao.endereco,
+                    especialidades=perfil.organizacao.especialidades,
+                ),
+                especialidade_ids,
+            )
+            perfil = SimpleNamespace(
+                organizacao=organizacao_atualizada,
+                membership=perfil.membership,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ProfissionalIndependenteOutput(
         organizacao=organizacao_para_output(perfil.organizacao),
         membership=membership_para_output(perfil.membership),
@@ -2325,6 +2546,7 @@ def criar_servico_endpoint(
         ),
     )
     salvo = use_case.executar(servico)
+    indice_busca_nomes.invalidar()
     return servico_para_output(salvo)
 
 
@@ -3831,12 +4053,20 @@ def atualizar_catalogo_status_endpoint(
 
 
 def _nome_servico_para_output(nome_servico: NomeServico) -> NomeServicoOutput:
-    return NomeServicoOutput(id=str(nome_servico.id), nome=nome_servico.nome)
+    return NomeServicoOutput(
+        id=str(nome_servico.id),
+        nome=nome_servico.nome,
+        categorias=[
+            CategoriaServicoOutput(id=str(categoria.id), nome=categoria.nome)
+            for categoria in nome_servico.categorias
+        ] or None,
+    )
 
 
 @app.get(
     "/catalogo/nomes-servico",
     response_model=list[NomeServicoOutput],
+    response_model_exclude_none=True,
     tags=["Catálogos"],
     dependencies=[Depends(limitar_endpoint_publico)],
     summary="Lista nomes de serviço",
@@ -3852,6 +4082,7 @@ def listar_nomes_servico_endpoint() -> list[NomeServicoOutput]:
 @app.get(
     "/catalogo/nomes-servico/{nome_servico_id}",
     response_model=NomeServicoOutput,
+    response_model_exclude_none=True,
     tags=["Catálogos"],
     dependencies=[Depends(limitar_endpoint_publico)],
     summary="Busca nome de serviço por ID",
@@ -3868,6 +4099,7 @@ def buscar_nome_servico_endpoint(nome_servico_id: str) -> NomeServicoOutput:
 @app.post(
     "/catalogo/nomes-servico",
     response_model=NomeServicoOutput,
+    response_model_exclude_none=True,
     tags=["Catálogos"],
     summary="Cria nome de serviço",
 )
@@ -3879,12 +4111,19 @@ def criar_nome_servico_endpoint(
     if repo.buscar_por_nome(payload.nome) is not None:
         raise HTTPException(status_code=409, detail="nome de serviço já cadastrado")
     nome_servico = NomeServico(id=uuid.uuid7(), nome=payload.nome)
-    return _nome_servico_para_output(repo.salvar(nome_servico))
+    try:
+        categoria_ids = [uuid.UUID(categoria_id) for categoria_id in payload.categoria_ids]
+        salvo = repo.salvar(nome_servico, categoria_ids)
+        indice_busca_nomes.invalidar()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _nome_servico_para_output(salvo)
 
 
 @app.put(
     "/catalogo/nomes-servico/{nome_servico_id}",
     response_model=NomeServicoOutput,
+    response_model_exclude_none=True,
     tags=["Catálogos"],
     summary="Atualiza nome de serviço",
 )
@@ -3901,7 +4140,13 @@ def atualizar_nome_servico_endpoint(
     if existente is not None and existente.id != nome_servico.id:
         raise HTTPException(status_code=409, detail="nome de serviço já cadastrado")
     atualizado = NomeServico(id=nome_servico.id, nome=payload.nome)
-    return _nome_servico_para_output(repo.atualizar(atualizado))
+    try:
+        categoria_ids = [uuid.UUID(categoria_id) for categoria_id in payload.categoria_ids]
+        salvo = repo.atualizar(atualizado, categoria_ids)
+        indice_busca_nomes.invalidar()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _nome_servico_para_output(salvo)
 
 
 @app.delete(
@@ -3922,6 +4167,7 @@ def remover_nome_servico_endpoint(
         repo.remover(uuid.UUID(nome_servico_id))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    indice_busca_nomes.invalidar()
     return {"status": "deleted"}
 
 
@@ -4017,6 +4263,92 @@ def remover_categoria_servico_endpoint(
         repo.remover(uuid.UUID(categoria_id))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "deleted"}
+
+
+def _especialidade_para_output_api(especialidade: Especialidade) -> EspecialidadeOutput:
+    return EspecialidadeOutput(id=str(especialidade.id), nome=especialidade.nome)
+
+
+@app.get(
+    "/catalogo/especialidades",
+    response_model=list[EspecialidadeOutput],
+    tags=["Catálogos"],
+    dependencies=[Depends(limitar_endpoint_publico)],
+    summary="Lista especialidades",
+)
+def listar_especialidades_endpoint() -> list[EspecialidadeOutput]:
+    repo = EspecialidadeRepository(app.state.engine)
+    return [_especialidade_para_output_api(item) for item in repo.listar()]
+
+
+@app.get(
+    "/catalogo/especialidades/{especialidade_id}",
+    response_model=EspecialidadeOutput,
+    tags=["Catálogos"],
+    dependencies=[Depends(limitar_endpoint_publico)],
+    summary="Busca especialidade por ID",
+)
+def buscar_especialidade_endpoint(especialidade_id: str) -> EspecialidadeOutput:
+    especialidade = EspecialidadeRepository(app.state.engine).buscar_por_id(uuid.UUID(especialidade_id))
+    if especialidade is None:
+        raise HTTPException(status_code=404, detail="Especialidade não encontrada")
+    return _especialidade_para_output_api(especialidade)
+
+
+@app.post(
+    "/catalogo/especialidades",
+    response_model=EspecialidadeOutput,
+    tags=["Catálogos"],
+    summary="Cria especialidade",
+)
+def criar_especialidade_endpoint(
+    payload: EspecialidadeInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> EspecialidadeOutput:
+    repo = EspecialidadeRepository(app.state.engine)
+    if repo.buscar_por_nome(payload.nome) is not None:
+        raise HTTPException(status_code=409, detail="especialidade já cadastrada")
+    especialidade = Especialidade(id=uuid.uuid7(), nome=payload.nome)
+    return _especialidade_para_output_api(repo.salvar(especialidade))
+
+
+@app.put(
+    "/catalogo/especialidades/{especialidade_id}",
+    response_model=EspecialidadeOutput,
+    tags=["Catálogos"],
+    summary="Atualiza especialidade",
+)
+def atualizar_especialidade_endpoint(
+    especialidade_id: str,
+    payload: EspecialidadeInput,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> EspecialidadeOutput:
+    repo = EspecialidadeRepository(app.state.engine)
+    especialidade = repo.buscar_por_id(uuid.UUID(especialidade_id))
+    if especialidade is None:
+        raise HTTPException(status_code=404, detail="Especialidade não encontrada")
+    existente = repo.buscar_por_nome(payload.nome)
+    if existente is not None and existente.id != especialidade.id:
+        raise HTTPException(status_code=409, detail="especialidade já cadastrada")
+    atualizada = Especialidade(id=especialidade.id, nome=payload.nome)
+    return _especialidade_para_output_api(repo.atualizar(atualizada))
+
+
+@app.delete(
+    "/catalogo/especialidades/{especialidade_id}",
+    status_code=200,
+    tags=["Catálogos"],
+    summary="Remove especialidade",
+)
+def remover_especialidade_endpoint(
+    especialidade_id: str,
+    identidade: IdentidadeExterna = Depends(exigir_gerenciar_catalogos),
+) -> dict[str, str]:
+    repo = EspecialidadeRepository(app.state.engine)
+    if repo.buscar_por_id(uuid.UUID(especialidade_id)) is None:
+        raise HTTPException(status_code=404, detail="Especialidade não encontrada")
+    repo.remover(uuid.UUID(especialidade_id))
     return {"status": "deleted"}
 
 
@@ -4305,5 +4637,255 @@ def remover_anexo_endpoint(
     _autorizar_anexo(identidade, anexo.entidade_tipo, anexo.entidade_id)
     repo.remover(anexo.id)
     return {"status": "deleted"}
+
+
+def _pagina_admin(pagina, conversor) -> dict:
+    return {
+        "items": [conversor(item) for item in pagina.items],
+        "page": pagina.page,
+        "page_size": pagina.page_size,
+        "total": pagina.total,
+        "pages": pagina.pages,
+    }
+
+
+def _uf_output(item: UnidadeFederacaoModel) -> dict:
+    return {"id": item.id, "codigo_ibge": item.codigo_ibge, "nome": item.nome, "sigla": item.sigla}
+
+
+def _municipio_output(item: MunicipioModel) -> dict:
+    return {"id": item.id, "codigo_ibge": item.codigo_ibge, "nome": item.nome, "unidade_federacao_id": item.unidade_federacao_id}
+
+
+@app.get("/admin/unidades-federacao", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def listar_ufs_admin_endpoint(
+    busca: str = Query(default=""), page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> dict:
+    return _pagina_admin(LocalidadeRepository(app.state.engine).listar_ufs(busca, page, page_size), _uf_output)
+
+
+@app.get("/admin/unidades-federacao-geolocalizacao", response_model=SugestaoUfOutput, tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def sugerir_uf_por_geolocalizacao_endpoint(
+    latitude: Decimal = Query(..., ge=-90, le=90),
+    longitude: Decimal = Query(..., ge=-180, le=180),
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> SugestaoUfOutput:
+    try:
+        resposta = httpx.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": str(latitude), "lon": str(longitude), "format": "jsonv2", "zoom": "3"},
+            headers={"Accept": "application/json", "User-Agent": "agenda-app"},
+            timeout=5.0,
+        )
+        resposta.raise_for_status()
+        endereco = resposta.json().get("address", {})
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="serviço de geolocalização indisponível") from exc
+    sigla = endereco.get("ISO3166-2-lvl4", "").split("-")[-1].upper()
+    uf = LocalidadeRepository(app.state.engine).buscar_uf_por_sigla(sigla)
+    if uf is None:
+        raise HTTPException(status_code=404, detail="UF não identificada pela geolocalização")
+    return SugestaoUfOutput(**_uf_output(uf))
+
+
+@app.get("/admin/unidades-federacao/{item_id}", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def buscar_uf_admin_endpoint(item_id: str, identidade: IdentidadeExterna = Depends(identidade_autenticada)) -> dict:
+    item = LocalidadeRepository(app.state.engine).buscar_uf(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="UF não encontrada")
+    return _uf_output(item)
+
+
+@app.post("/admin/unidades-federacao", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def criar_uf_admin_endpoint(payload: UnidadeFederacaoInput, identidade: IdentidadeExterna = Depends(identidade_autenticada)) -> dict:
+    try:
+        return _uf_output(LocalidadeRepository(app.state.engine).salvar(UnidadeFederacaoModel(id=novo_catalogo_id(), **payload.model_dump())))
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="UF já cadastrada") from exc
+
+
+@app.put("/admin/unidades-federacao/{item_id}", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def atualizar_uf_admin_endpoint(item_id: str, payload: UnidadeFederacaoInput, identidade: IdentidadeExterna = Depends(identidade_autenticada)) -> dict:
+    repo = LocalidadeRepository(app.state.engine)
+    if repo.buscar_uf(item_id) is None:
+        raise HTTPException(status_code=404, detail="UF não encontrada")
+    try:
+        return _uf_output(repo.atualizar(UnidadeFederacaoModel(id=item_id, **payload.model_dump())))
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="UF já cadastrada") from exc
+
+
+@app.delete("/admin/unidades-federacao/{item_id}", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def remover_uf_admin_endpoint(item_id: str, identidade: IdentidadeExterna = Depends(identidade_autenticada)) -> dict[str, str]:
+    repo = LocalidadeRepository(app.state.engine)
+    item = repo.buscar_uf(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="UF não encontrada")
+    try:
+        repo.remover(item)
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="UF possui municípios vinculados") from exc
+    return {"status": "deleted"}
+
+
+@app.get("/admin/municipios", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def listar_municipios_admin_endpoint(
+    busca: str = Query(default=""), unidade_federacao_id: str | None = Query(default=None), page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> dict:
+    return _pagina_admin(LocalidadeRepository(app.state.engine).listar_municipios(busca, unidade_federacao_id, page, page_size), _municipio_output)
+
+
+@app.get("/admin/municipios/{item_id}", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def buscar_municipio_admin_endpoint(item_id: str, identidade: IdentidadeExterna = Depends(identidade_autenticada)) -> dict:
+    item = LocalidadeRepository(app.state.engine).buscar_municipio(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Município não encontrado")
+    return _municipio_output(item)
+
+
+@app.post("/admin/municipios", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def criar_municipio_admin_endpoint(payload: MunicipioInput, identidade: IdentidadeExterna = Depends(identidade_autenticada)) -> dict:
+    repo = LocalidadeRepository(app.state.engine)
+    if repo.buscar_uf(payload.unidade_federacao_id) is None:
+        raise HTTPException(status_code=400, detail="UF não encontrada")
+    try:
+        return _municipio_output(repo.salvar(MunicipioModel(id=novo_catalogo_id(), **payload.model_dump())))
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Município já cadastrado") from exc
+
+
+@app.put("/admin/municipios/{item_id}", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def atualizar_municipio_admin_endpoint(item_id: str, payload: MunicipioInput, identidade: IdentidadeExterna = Depends(identidade_autenticada)) -> dict:
+    repo = LocalidadeRepository(app.state.engine)
+    if repo.buscar_municipio(item_id) is None:
+        raise HTTPException(status_code=404, detail="Município não encontrado")
+    if repo.buscar_uf(payload.unidade_federacao_id) is None:
+        raise HTTPException(status_code=400, detail="UF não encontrada")
+    try:
+        return _municipio_output(repo.atualizar(MunicipioModel(id=item_id, **payload.model_dump())))
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Município já cadastrado") from exc
+
+
+@app.delete("/admin/municipios/{item_id}", tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def remover_municipio_admin_endpoint(item_id: str, identidade: IdentidadeExterna = Depends(identidade_autenticada)) -> dict[str, str]:
+    repo = LocalidadeRepository(app.state.engine)
+    item = repo.buscar_municipio(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Município não encontrado")
+    try:
+        repo.remover(item)
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Município possui localidades vinculadas") from exc
+    return {"status": "deleted"}
+
+
+@app.get(
+    "/admin/enderecos/cep/{cep}",
+    response_model=ConsultaCepOutput,
+    tags=["Administração"],
+    dependencies=[Depends(exigir_gerenciar_catalogos)],
+    summary="Consulta endereço por CEP",
+)
+def consultar_cep_admin_endpoint(
+    cep: str,
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> ConsultaCepOutput:
+    cep_normalizado = "".join(caractere for caractere in cep if caractere.isdigit())
+    if len(cep_normalizado) != 8:
+        raise HTTPException(status_code=422, detail="CEP deve conter 8 dígitos")
+    try:
+        resposta = httpx.get(
+            f"https://viacep.com.br/ws/{cep_normalizado}/json/",
+            timeout=5.0,
+            headers={"Accept": "application/json", "User-Agent": "agenda-app"},
+        )
+        resposta.raise_for_status()
+        dados = resposta.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="serviço de CEP indisponível") from exc
+    if dados.get("erro"):
+        raise HTTPException(status_code=404, detail="CEP não encontrado")
+    return ConsultaCepOutput(
+        cep=dados.get("cep", cep_normalizado),
+        logradouro=dados.get("logradouro", ""),
+        complemento=dados.get("complemento", ""),
+        bairro=dados.get("bairro", ""),
+        municipio=dados.get("localidade", ""),
+        uf=dados.get("uf", ""),
+        localidade=dados.get("unidade", ""),
+    )
+
+
+@app.get(
+    "/admin/cadastros/{cadastro_id}/endereco",
+    response_model=EnderecoOutput,
+    tags=["Administração"],
+    dependencies=[Depends(exigir_gerenciar_catalogos)],
+    summary="Consulta endereço pelo cadastro dono",
+)
+def consultar_endereco_por_cadastro_endpoint(
+    cadastro_id: str,
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> EnderecoOutput:
+    with criar_session(app.state.engine) as session:
+        endereco = obter_endereco(session, cadastro_id)
+        if endereco is None:
+            raise HTTPException(status_code=404, detail="Endereço não encontrado para o cadastro")
+        return EnderecoOutput(
+            logradouro=endereco.logradouro,
+            numero=endereco.numero,
+            cidade=endereco.cidade,
+            estado=endereco.estado,
+            cep=endereco.cep,
+            bairro=endereco.bairro,
+            tipo="principal",
+            principal=True,
+        )
+
+
+@app.get("/admin/cadastros/{cadastro_id}/enderecos", response_model=list[EnderecoOutput], tags=["Administração"], dependencies=[Depends(exigir_gerenciar_catalogos)])
+def listar_enderecos_por_cadastro_endpoint(cadastro_id: str, identidade: IdentidadeExterna = Depends(identidade_autenticada)) -> list[EnderecoOutput]:
+    with criar_session(app.state.engine) as session:
+        vinculos = session.execute(
+            select(CadastroEnderecoModel, EnderecoModel)
+            .join(EnderecoModel, EnderecoModel.id == CadastroEnderecoModel.endereco_id)
+            .where(CadastroEnderecoModel.cadastro_id == cadastro_id, CadastroEnderecoModel.ativo.is_(True))
+            .order_by(CadastroEnderecoModel.principal.desc(), EnderecoModel.id)
+        ).all()
+        return [
+            EnderecoOutput(logradouro=item.logradouro, numero=item.numero, cidade=item.cidade, estado=item.estado, cep=item.cep, bairro=item.bairro, tipo=vinculo.tipo, descricao=vinculo.descricao, principal=vinculo.principal)
+            for vinculo, item in vinculos
+        ]
+
+
+@app.put(
+    "/admin/cadastros/{cadastro_id}/endereco",
+    response_model=EnderecoOutput,
+    tags=["Administração"],
+    dependencies=[Depends(exigir_gerenciar_catalogos)],
+    summary="Cria ou atualiza endereço pelo cadastro dono",
+)
+def salvar_endereco_por_cadastro_endpoint(
+    cadastro_id: str,
+    payload: EnderecoInput,
+    identidade: IdentidadeExterna = Depends(identidade_autenticada),
+) -> EnderecoOutput:
+    with criar_session(app.state.engine) as session:
+        if session.get(CadastroModel, cadastro_id) is None:
+            raise HTTPException(status_code=404, detail="Cadastro dono não encontrado")
+        endereco = criar_endereco(session, cadastro_id, _endereco_from_input(payload), tipo=payload.tipo, descricao=payload.descricao, principal=payload.principal)
+        session.commit()
+        return EnderecoOutput(
+            logradouro=endereco.logradouro,
+            numero=endereco.numero,
+            cidade=endereco.cidade,
+            estado=endereco.estado,
+            cep=endereco.cep,
+            bairro=endereco.bairro,
+            tipo=payload.tipo,
+            descricao=payload.descricao,
+            principal=payload.principal,
+        )
 
 
