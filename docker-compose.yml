@@ -72,6 +72,18 @@ services:
       timeout: 5s
       retries: 12
 
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:3
+    container_name: agenda-opensearch-dashboards
+    restart: unless-stopped
+    environment:
+      OPENSEARCH_HOSTS: '["https://opensearch:9200"]'
+    ports:
+      - "127.0.0.1:${OPENSEARCH_DASHBOARDS_PORT:-5601}:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
 volumes:
   agenda_postgres_data:
   agenda_keycloak_data:
