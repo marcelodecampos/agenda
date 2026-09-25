@@ -126,7 +126,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setPermissions([]);
       },
       apiFetch: async (input, init = {}) => {
-        await keycloak.updateToken(30);
+        if (keycloak.authenticated && keycloak.refreshToken) await keycloak.updateToken(30);
         const headers = new Headers(init.headers);
         if (keycloak.token) headers.set("Authorization", `Bearer ${keycloak.token}`);
         return fetch(input, { ...init, headers });

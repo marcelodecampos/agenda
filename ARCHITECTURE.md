@@ -10,6 +10,98 @@ Registro das decisoes tecnicas que orientam a implementacao da plataforma Agenda
 
 ## Decisoes confirmadas
 
+### 0. Convencao de nomes tecnicos
+
+Todos os nomes tecnicos do sistema devem ser escritos em ingles, incluindo:
+
+- entidades e objetos de dominio;
+- tabelas, colunas, indices e constraints do banco;
+- nomes de relacionamentos e chaves estrangeiras;
+- repositorios, casos de uso, ports, adapters e contratos internos.
+
+Textos exibidos ao usuario podem permanecer em portugues. Essa separacao evita
+misturar linguagem de interface com nomenclatura tecnica e deve ser aplicada a
+todo novo modulo, migration ou endpoint interno.
+
+#### 0.1 Entidade polimorfica de identidade
+
+A identidade persistente sera modelada por uma hierarquia polimorfica SQLAlchemy
+com `BaseUser` como entidade-base e `Person` e `Company` como entidades derivadas.
+Todas as tabelas do banco devem usar nome em ingles, singular e caixa baixa.
+Portanto, a tabela-base deve ser `base_user`, e as tabelas derivadas
+devem ser `person` e `company`.
+
+O discriminador da heranca fica em `base_user.person_type`. A configuracao conceitual
+da hierarquia e:
+
+```python
+class BaseUser(Base):
+	__tablename__ = "base_user"
+	name: Mapped[str] = mapped_column(String(255))
+	nickname: Mapped[str] = mapped_column(String(255))
+	birth_date: Mapped[date] = mapped_column(Date)
+	__mapper_args__ = {
+		"polymorphic_on": "person_type",
+		"polymorphic_identity": "base_user",
+	}
+
+
+class Person(BaseUser):
+	__tablename__ = "person"
+	cpf: Mapped[str] = mapped_column(String)
+	__mapper_args__ = {
+		"polymorphic_identity": PersonType.PERSON.value,
+	}
+
+
+class Company(BaseUser):
+	__tablename__ = "company"
+	cnpj: Mapped[str] = mapped_column(String)
+	__mapper_args__ = {
+		"polymorphic_identity": PersonType.COMPANY.value,
+	}
+```
+
+`Person` e `Company` devem usar heranca de tabela unida, com a chave primaria
+da tabela derivada referenciando `base_user.id`. O valor-base `base_user` identifica a
+entidade-raiz; os valores `PersonType.PERSON.value` e
+`PersonType.COMPANY.value` identificam as entidades concretas.
+
+#### 0.2 Catalogos simples
+
+Catalogos simples que representem tipos ou opcoes devem usar somente uma chave
+primaria UUIDv7 `id` e uma `description` textual. A `description` deve ser
+unica no banco; nao criar um campo `code` separado quando o `id` ja identifica o
+registro. Novas categorias devem ser adicionadas como registros, nao como enum
+fixo em Python.
+
+Nos modelos de negocio, os campos devem ser opcionais por padrao quando a
+regra nao exigir preenchimento. `BaseUser.name` e obrigatorio. Em catalogos
+simples, `id` e `description` sao obrigatorios; os demais campos de negocio
+podem aceitar nulo quando aplicavel. Campos tecnicos como `id`, `person_type`,
+timestamps e `version` permanecem obrigatorios para a integridade do modelo.
+
+#### 0.3 Auditoria e concorrencia otimista
+
+Toda entidade persistente deve reutilizar `AuditVersionMixin`, que fornece
+`created_at` e `updated_at` como timestamps com timezone e `version` como
+contador inteiro de concorrencia otimista. O SQLAlchemy usa `version` como
+`version_id_col` e rejeita uma atualizacao baseada em uma versao obsoleta.
+
+Em heranca de tabela unida, como `BaseUser`/`Person`/`Company`, os campos ficam
+na tabela-raiz `base_user` e o versionamento protege o registro polimorfico
+inteiro. Tabelas independentes, como `gender`, aplicam o mixin diretamente.
+Nao duplicar esses campos nas tabelas derivadas da mesma entidade.
+
+Os atributos comuns da entidade-raiz sao `name` e `nickname`, ambos strings
+com limite de 255 caracteres, e `birth_date`, armazenado somente como data
+(`DATE`), sem componente de horario. `nickname` representa o nome social
+quando informado; nao sera criada uma coluna separada `social_name` neste
+momento. `Person` possui o atributo `cpf` e
+`Company` possui o atributo `cnpj`; ambos sao campos unicos no banco. A
+obrigatoriedade e o formato de armazenamento desses documentos devem ser
+definidos pela regra de identidade e LGPD antes da migration correspondente.
+
 ### 1. Monolito modular no MVP
 
 O MVP sera implementado como um monolito modular. Nao serao usados microservicos neste momento.
@@ -18,12 +110,14 @@ A ausencia de microservicos nao permite acoplamento direto entre modulos. Cada m
 
 ### 2. Isolamento de dependencias e modulos
 
-O dominio e os casos de uso nao devem depender diretamente de frameworks, brokers, provedores externos, ORMs ou detalhes de infraestrutura.
+As entidades persistentes Python serao derivadas de SQLAlchemy 2.x, usando a API tipada (`DeclarativeBase`, `Mapped` e `mapped_column`). A versao usada deve acompanhar a versao estavel mais recente compativel com o projeto, atualmente declarada no `pyproject.toml`.
 
-A regra de dependencia e:
+Essa decisao substitui a regra anterior de manter as entidades persistentes independentes de ORM. O dominio e os casos de uso podem operar sobre essas entidades quando isso fizer parte do modelo implementado, mas ports e contratos publicos nao devem expor tipos SQLAlchemy nem depender da API do ORM.
+
+A regra de dependencia para os componentes da aplicacao e:
 
 ```text
-Dominio -> Casos de uso -> Ports -> Adapters -> Infraestrutura
+Dominio/Entidades SQLAlchemy -> Casos de uso -> Ports -> Adapters -> Infraestrutura
 ```
 
 Dependencias com probabilidade relevante de mudanca devem ficar atras de ports (contratos) e adapters (implementacoes). Os ports representam capacidades do negocio, e nao APIs de fornecedores.
@@ -159,7 +253,8 @@ Essa escolha atende ao MVP exclusivamente web, favorece SEO e carregamento inici
 
 ## Regras de implementacao
 
-- Nao importar bibliotecas de infraestrutura no dominio.
+- Toda entidade persistente Python deve derivar da base declarativa do SQLAlchemy 2.x; nao criar entidades persistentes com `dataclass`, `BaseModel` ou ORM alternativo.
+- Usar a API tipada do SQLAlchemy 2.x (`Mapped`, `mapped_column` e relacionamentos tipados).
 - Nao expor tipos de ORM nos ports ou contratos publicos.
 - Nao usar classes internas de um modulo como API de outro modulo.
 - Preferir contratos pequenos e orientados a capacidades do negocio.

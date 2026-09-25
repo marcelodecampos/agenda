@@ -23,3 +23,9 @@ No **primeiro prompt de uma nova sessão** neste workspace, antes de iniciar qua
 - Identificadores internos novos usam **UUIDv7**, não UUIDv4.
 - Monólito modular no MVP, regra de dependência `Domínio -> Casos de uso -> Ports -> Adapters -> Infraestrutura`.
 - Regras de negócio parametrizáveis viram **dados** (ex: status/transição de agendamento, papéis/permissões), nunca enum fixo em código, quando há risco real de mudança.
+- Todas as entidades persistentes Python devem derivar de SQLAlchemy 2.x, usando sua API tipada; não criar entidades persistentes com `dataclass`, `BaseModel` ou ORM alternativo.
+- Tabelas do banco usam sempre nomes técnicos em inglês, no singular e em caixa baixa. A hierarquia polimórfica de identidade usa `BaseUser` como base (`base_user`), com `Person` (`person`) e `Company` (`company`) como derivadas; o discriminador fica em `base_user.person_type`.
+- `BaseUser` possui `name` e `nickname` como strings de 255 caracteres e `birth_date` como `date` sem horário; `Person` possui `cpf` e `Company` possui `cnpj`, ambos únicos no banco. Não definir obrigatoriedade ou formato desses documentos sem requisito explícito.
+- `BaseUser.nickname` representa o nome social quando informado; não criar uma coluna separada `social_name` sem novo requisito.
+- Catálogos simples de tipos ou opções usam somente `id` UUIDv7 e `description` textual única; não criar campo `code` separado nem enum fixo em Python.
+- Campos de negócio são opcionais quando possível. `BaseUser.name` é obrigatório; em catálogos simples, `id` e `description` são obrigatórios. Campos técnicos permanecem obrigatórios.

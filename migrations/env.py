@@ -8,18 +8,8 @@ from sqlalchemy import engine_from_config
 from agenda.config import settings
 from agenda.infrastructure.db import Base
 
-# Import all ORM modules so every mapped table is registered in Base.metadata.
-from agenda.infrastructure import (  # noqa: F401, E402
-    agendamento_repository,
-    disponibilidade_repository,
-    fidelidade_repository,
-    membership_repository,
-    notificacao_repository,
-    organizacao_repository,
-    pacote_repository,
-    servico_repository,
-    usuario_repository,
-)
+# Import ORM models so every mapped table is registered in Base.metadata.
+from agenda import models  # noqa: F401, E402
 
 
 config = context.config

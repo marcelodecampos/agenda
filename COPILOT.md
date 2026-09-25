@@ -36,7 +36,12 @@
 
 O sistema deve ser construído como um **monólito modular** no MVP, com fronteiras explícitas entre domínio, casos de uso e infraestrutura. A ausência de microserviços não autoriza acoplamento direto entre módulos.
 
-- O domínio e os casos de uso não devem depender diretamente de frameworks, brokers, provedores externos, ORMs ou detalhes de infraestrutura.
+- As entidades persistentes Python devem derivar de SQLAlchemy 2.x e usar sua API tipada (`DeclarativeBase`, `Mapped` e `mapped_column`). O domínio e os casos de uso não devem expor tipos ORM em ports ou contratos públicos.
+- As tabelas devem ter nomes técnicos em inglês, no singular e em caixa baixa. A identidade usa a hierarquia polimórfica `BaseUser`/`Person`/`Company`, com tabelas `base_user`/`person`/`company` e discriminador `base_user.person_type`.
+- `BaseUser` usa `name` e `nickname` como `String(255)` e `birth_date` como `Date`, nunca `DateTime`; `Person` usa `cpf` e `Company` usa `cnpj`, ambos com unicidade no banco. Obrigatoriedade e formato dependem de requisito explícito.
+- `BaseUser.nickname` é o nome social quando informado; não duplicar esse dado em `social_name` sem requisito novo.
+- Catálogos simples usam `id` UUIDv7 e `description` única; o `id` substitui um campo `code` separado e os valores devem permanecer como registros, não enums fixos.
+- Campos de negócio devem aceitar nulo quando possível. `name` é obrigatório e catálogos simples exigem `id` e `description`; campos técnicos continuam obrigatórios.
 - Componentes com probabilidade relevante de substituição devem ser acessados por ports (contratos) e implementados por adapters.
 - Ports devem representar capacidades do negócio, e não reproduzir a API de um fornecedor.
 - Integrações como filas, notificações, geolocalização, autenticação e persistência devem poder trocar de implementação sem alterações no domínio.
@@ -55,6 +60,49 @@ O sistema deve ser construído como um **monólito modular** no MVP, com frontei
 - Se criar código temporário, remova antes de commitar
 - Respeite convenções existentes do código ao redor
 - Mantenha blast radius reduzido
+
+### 3.1. Nomenclatura técnica
+
+Use inglês para toda nomenclatura técnica nova ou alterada:
+
+- entidades e classes de domínio;
+- tabelas, colunas, índices, constraints e chaves estrangeiras;
+- repositórios, casos de uso, ports, adapters e contratos internos.
+
+O português fica reservado para textos da interface, mensagens destinadas ao
+usuário e documentação funcional quando fizer sentido. Não criar nomes técnicos
+em português nem misturar os dois idiomas no mesmo modelo.
+
+### 3.2. Identificadores de componentes
+
+Todo componente novo de frontend deve possuir um `id` estável e semântico para
+automação de testes. Não usar texto traduzível, índice visual ou posição no DOM
+como identificador; elementos repetidos devem derivar o `id` da identidade do
+registro.
+
+### 3.3. Isolamento de estado no frontend
+
+Vazamento implícito de estado entre telas ou features é falha de segurança e
+não é permitido. Busca, filtros, seleção, edição, formulários, erros e
+resultados devem ser isolados por rota ou por uma chave de contexto explícita.
+Compartilhamento somente pode ocorrer por contrato documentado e quando a
+operação exigir continuidade, como autenticação e autorização.
+
+Campos de formulário com máscara fixa devem usar largura visual baseada em
+`quantidade máxima de caracteres × 13px`. CPF usa 143px e CNPJ usa 182px;
+campos livres podem ocupar a largura disponível do formulário.
+
+O frontend usa a tipografia padrão do MUI; não impor uma família de fonte
+global nos componentes.
+
+O frontend usa MUI como biblioteca única de componentes visuais, Emotion como
+mecanismo de estilos e Material Icons como biblioteca de ícones. Não introduzir
+Radix, shadcn/ui, Tailwind ou uma segunda biblioteca visual.
+
+Inputs administrativos devem usar fonte padrão de `0.75rem` (`12px`) e altura
+de `30px`, com labels de `0.75rem`.
+Listas administrativas também usam `0.75rem` (`12px`) e espaçamento vertical
+compacto, preservando o tamanho interativo de checkboxes e ações.
 
 **Aplicação no projeto:**
 - Cada camada tem responsabilidade única (SRP)

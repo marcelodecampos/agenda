@@ -3,7 +3,6 @@
 import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "./auth-provider";
-import AdminArea from "./admin-area";
 
 type Oferta = {
   servico: {
@@ -37,11 +36,9 @@ export default function Home() {
     loading: authLoading,
     userName,
     roles,
-    permissions,
     login,
     logout,
   } = useAuth();
-  const isPlatformAdmin = roles.includes("platform_admin");
   const [categoria, setCategoria] = useState("");
   const [endereco, setEndereco] = useState("");
   const [raioKm, setRaioKm] = useState("10");
@@ -77,11 +74,11 @@ export default function Home() {
 
   return (
     <main className="shell">
-      {!isPlatformAdmin && <header className="topbar">
+      <header className="topbar">
         <Link className="brand" href="/">agenda<span>.</span></Link>
         <div className="account-actions">
-          {!isPlatformAdmin && <a className="provider-link" href="#ofertas">Sou profissional?</a>}
-          {!authLoading && !isPlatformAdmin && (authenticated ? (
+          <a className="provider-link" href="#ofertas">Sou profissional?</a>
+          {!authLoading && (authenticated ? (
             <button className="account-button" type="button" onClick={() => void logout()}>
               {userName} · Sair
             </button>
@@ -91,33 +88,26 @@ export default function Home() {
             </button>
           ))}
         </div>
-      </header>}
+      </header>
 
-      {authenticated && !isPlatformAdmin && (
+      {authenticated && (
           <section className="account-panel" aria-label="Área do usuário">
           <div>
             <p className="eyebrow">Área autenticada</p>
             <h2>Olá, {userName}</h2>
             <p className="account-summary">
-              {roles.includes("platform_admin")
-                ? "Administrador da plataforma"
-                : permissions.includes("agendamento.solicitar")
-                  ? "Cliente"
-                  : "Profissional"}
+              &quot;Encontre serviços e ofertas perto de você&quot;
             </p>
-          </div>
-          <div className="account-links">
-            {roles.includes("platform_admin") && <a href="#administracao">Administração da plataforma</a>}
-            {permissions.includes("agendamento.solicitar") && <a href="#agendamentos">Meus agendamentos</a>}
-            {permissions.includes("agenda.configurar") && <a href="#agenda">Minha agenda</a>}
-            {permissions.includes("servico.gerenciar") && <a href="#servicos">Meus serviços</a>}
+            {roles.includes("platform_admin") && (
+              <Link className="admin-entry-link" href="/admin">
+                Administração
+              </Link>
+            )}
           </div>
         </section>
       )}
 
-      {isPlatformAdmin && <AdminArea userName={userName} logout={logout} />}
-
-      {!isPlatformAdmin && <>
+      <>
         <section className="hero">
           <p className="eyebrow">Cuide de você, no seu tempo</p>
           <h1>Encontre o cuidado que cabe na sua rotina.</h1>
@@ -177,7 +167,7 @@ export default function Home() {
             ))}
           </div>
         </section>
-      </>}
+      </>
     </main>
   );
 }
