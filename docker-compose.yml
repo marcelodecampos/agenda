@@ -67,7 +67,6 @@ services:
       - "127.0.0.1:${OPENSEARCH_PORT:-9200}:9200"
     volumes:
       - agenda_opensearch_data:/usr/share/opensearch/data
-      - ./opensearch.yml:/usr/share/opensearch/config/opensearch.yml
     healthcheck:
       test: ["CMD-SHELL", "curl -sk -u admin:$${OPENSEARCH_INITIAL_ADMIN_PASSWORD} https://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
       interval: 10s

@@ -1,5 +1,2 @@
-index.number_of_replicas: 0
 discovery.type: single-node
-index.number_of_shards: 1
 plugins.security.disabled: true
-index.translog.durability: async
