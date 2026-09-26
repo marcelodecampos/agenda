@@ -1,3 +1,4 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +29,21 @@ class Settings(BaseSettings):
     media_storage_provider: str = "filesystem"
     media_storage_path: str = "./data/media"
     media_base_url: str = "http://localhost:8081"
+    opensearch_url: str = "https://localhost:9200"
+    opensearch_username: str = "admin"
+    # Reaproveita a senha do container local quando OPENSEARCH_PASSWORD nao for definida.
+    opensearch_password: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENSEARCH_PASSWORD", "OPENSEARCH_INITIAL_ADMIN_PASSWORD"),
+    )
+    opensearch_verify_certs: bool = False
+    search_worker_name: str | None = None
+    search_worker_batch_size: int = 100
+    search_worker_max_attempts: int = 5
+    search_worker_retry_delay_seconds: int = 60
+    search_worker_retry_max_delay_seconds: int = 3600
+    search_worker_poll_interval_seconds: float = 1.0
+    search_worker_lock_timeout_seconds: int = 300
 
     model_config = SettingsConfigDict(
         env_file=".env",

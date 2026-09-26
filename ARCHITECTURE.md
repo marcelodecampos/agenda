@@ -197,7 +197,8 @@ O Docker Compose sera usado para executar as dependencias externas do ambiente l
 
 - PostgreSQL;
 - Keycloak;
-- Mailpit para testes locais de e-mail.
+- Mailpit para testes locais de e-mail;
+- OpenSearch e OpenSearch Dashboards.
 
 A aplicacao Python sera executada diretamente no WSL por meio do Poetry, facilitando o ciclo de desenvolvimento, o debug e o reload. O frontend tambem sera executado localmente conforme o framework que vier a ser escolhido.
 
@@ -251,6 +252,183 @@ O frontend consumira a API do FastAPI por contratos HTTP versionaveis. Regras de
 
 Essa escolha atende ao MVP exclusivamente web, favorece SEO e carregamento inicial nas paginas publicas de descoberta e mantem aberta uma futura evolucao para aplicativos baseados no ecossistema React. A escolha nao implica compartilhamento obrigatorio de componentes entre o site e futuros aplicativos nativos.
 
+### 9. Mecanismo de busca
+
+O **OpenSearch** sera usado como mecanismo de busca textual da plataforma.
+
+- O PostgreSQL permanece como fonte de verdade. O indice do OpenSearch e um dado derivado, que pode ser reconstruido a partir do banco a qualquer momento.
+- Nenhuma regra de negocio ou gravacao depende do OpenSearch; sua indisponibilidade degrada a busca, mas nao impede operacoes transacionais.
+- O acesso ocorre por uma porta de busca com adapter OpenSearch, seguindo a regra de isolamento de dependencias. Dominio e casos de uso nao conhecem o cliente OpenSearch.
+- Buscas simples e pontuais, como o autocomplete de municipios por prefixo, podem continuar no PostgreSQL (`unaccent`, `pg_trgm`, `fuzzystrmatch`) enquanto atenderem.
+- A sincronizacao usa tres tabelas, todas parte das migracoes e presentes sempre que o banco e recriado:
+  - `search_event` (padrao outbox): fila de eventos pendentes. Cada alteracao relevante registra `entity_type`, `entity_id` e `operation` (`INSERT`, `UPDATE`, `DELETE`). Controla retentativas (`attempts`, `next_run_at`) e concorrencia entre processadores (`locked_at`, `locked_by`). Um evento permanece nesta tabela apenas enquanto nao for concluido.
+  - `search_event_history`: resultado de cada processamento, com `processed_at`, `attempts`, `success`, `last_error` e o processador (`locked_by`). Registra sucessos e falhas recuperaveis (`success = false`).
+  - `search_event_dlq`: falhas definitivas, quando `attempts >= MAX`, com `failed_at`, `attempts`, `last_error` e `locked_by`.
+- Os eventos copiados para `search_event_history` e `search_event_dlq` preservam o `created_at` do evento original. A DLQ preserva tambem o `id`. O historico tem `id` proprio (UUIDv7) e referencia o evento por `event_id` (migracao `0020_search_history_event_id`), pois um evento pode gerar varias linhas.
+
+Ainda nao estao definidos: quais entidades serao indexadas, alem de `municipality`, e a forma de operacao em producao.
+
+#### 9.0 Fluxo de sincronizacao e busca
+
+```mermaid
+flowchart TD
+    APP["Aplicacao<br/>(CRUD: municipio etc.)"] --> PG["PostgreSQL<br/>tabela municipality"]
+    PG -- trigger --> EV["search_event<br/>fila principal<br/>attempts, next_run_at<br/>locked_at, locked_by"]
+    EV -- "FOR UPDATE SKIP LOCKED" --> W["Worker Python (N)<br/>multiplos processos, batch<br/>retry/backoff, DLQ"]
+    W --> OS["OpenSearch<br/>indice municipality<br/>analyzers, fuzzy, fonetico"]
+    W --> HIST["search_event_history<br/>sucesso ou falha recuperavel"]
+    W --> DLQ["search_event_dlq<br/>falha definitiva<br/>attempts >= MAX, last_error"]
+    OS --> API["API de busca (FastAPI)"]
+    API --> FE["Frontend (Refine / Ant Design)<br/>autocomplete inteligente"]
+```
+
+1. A aplicacao grava nas tabelas de negocio normalmente; ela nao conhece o OpenSearch.
+2. O trigger da tabela marcada (secao 9.1) registra o evento em `search_event`, na mesma transacao da alteracao.
+3. Um ou mais workers Python, em processos separados, buscam lotes de eventos com `next_run_at <= now()` e sem lock valido (`locked_at IS NULL` ou expirado), usando `SELECT ... FOR UPDATE SKIP LOCKED`, e marcam `locked_at` e `locked_by`. Assim varios workers rodam em paralelo sem processar o mesmo evento, e eventos de um worker que caiu voltam a ficar disponiveis apos a expiracao do lock.
+4. Para cada entidade do lote, o worker le o estado atual no PostgreSQL: se existe, indexa; se nao existe, remove do indice. A `operation` do evento e apenas informativa, o que torna o processamento idempotente e independente da ordem.
+5. Sucesso: o evento sai de `search_event` e e registrado em `search_event_history` com `success = true`.
+6. Falha recuperavel: incrementa `attempts`, agenda `next_run_at` com backoff, libera o lock e registra a falha em `search_event_history` com `success = false` e `last_error`.
+7. Falha definitiva (`attempts >= MAX`): o evento sai de `search_event` e vai para `search_event_dlq`. Eventos na DLQ nao chegam ao indice e exigem tratamento manual.
+8. A API de busca (FastAPI) consulta o OpenSearch por meio da porta de busca, e o frontend a usa no autocomplete.
+
+Os parametros e as demais decisoes do worker estao na secao 9.2.
+
+#### 9.1 Marcar uma tabela para sincronizacao
+
+Os eventos sao gravados por trigger no PostgreSQL, usando a funcao generica `search_event_capture()` (migracao `0016_search_event_capture`). Ela grava `entity_type = TG_TABLE_NAME`, usa `OLD.id` em `DELETE` e `NEW.id` nos demais casos, e gera o `id` com `uuidv7()` nativo do PostgreSQL 18.
+
+Marcar uma tabela significa criar uma nova migracao Alembic que, nesta ordem:
+
+1. remove o trigger se ja existir;
+2. cria o trigger apontando para a funcao generica;
+3. registra os dados ja existentes na tabela como eventos `INSERT` (carga inicial).
+
+```sql
+DROP TRIGGER IF EXISTS <tabela>_search_event_trigger ON <tabela>;
+
+CREATE TRIGGER <tabela>_search_event_trigger
+AFTER INSERT OR UPDATE OR DELETE ON <tabela>
+FOR EACH ROW EXECUTE FUNCTION search_event_capture();
+
+INSERT INTO search_event (id, entity_type, entity_id, operation)
+SELECT uuidv7(), '<tabela>', id, 'INSERT' FROM <tabela>;
+```
+
+O downgrade remove o trigger com `DROP TRIGGER IF EXISTS <tabela>_search_event_trigger ON <tabela>`. Nao criar funcao especifica por tabela nem usar `gen_random_uuid()`. A tabela marcada precisa ter chave primaria `id` do tipo `uuid`.
+
+Alem da migracao, cada tabela marcada precisa de um indexador (secao 9.2):
+
+1. criar `src/agenda/search/indexers/<tabela>.py` com `SETTINGS`, `MAPPINGS`, `load_documents` (carga do lote em uma unica consulta) e `INDEXER`, incluindo `analyzer_checks`, seguindo `indexers/municipality.py` e as regras da secao 9.3;
+2. registrar o `INDEXER` em `src/agenda/search/registry.py`;
+3. executar `poetry run searchctl prepare` para criar indice e alias.
+
+Sem indexador registrado, os eventos da tabela vao direto para a DLQ.
+
+Tabelas sincronizadas: `municipality` (migracao `0017_municipality_search_event`).
+
+#### 9.2 Worker de sincronizacao
+
+Decisoes:
+
+- **Processo separado**, fora do FastAPI, no mesmo codigo: `poetry run python -m agenda.search.worker`. Escala subindo N processos, independentemente da API. Reusa `settings`, modelos SQLAlchemy e a conexao com o banco.
+- **Worker unico e generico**: processa todos os `entity_type`. O que e especifico de cada tabela fica em um **indexador registrado** por `entity_type`, com o nome do indice e a funcao que carrega o lote de documentos a partir dos ids. Nova tabela sincronizada = marcar a tabela (secao 9.1) + criar o indexador; o worker nao muda.
+- **`entity_type` sem indexador registrado** vai direto para a DLQ, pois retentar nao corrige erro de configuracao.
+- **Nome do worker** (`locked_by`): `hostname-pid` por padrao, sobrescrevivel por variavel de ambiente. Identifica o processo, nao a tabela.
+- **Indices**: cada `entity_type` usa o alias `<entity_type>` (ex.: `municipality`) apontando para um indice versionado (`municipality_v1`). O worker nunca cria indices; se o alias nao existir, encerra com erro orientando executar `searchctl prepare` (secao 9.3).
+- **Documento**: montado explicitamente pelo indexador, nunca como copia da linha do banco. Pode desnormalizar dados relacionados (ex.: municipio inclui nome e sigla da UF).
+- **Lote**: carrega as entidades do lote em uma unica consulta e envia ao OpenSearch pela API bulk, tratando o erro de cada item individualmente. Eventos repetidos da mesma entidade no lote viram uma unica operacao.
+- **Retentativa**: backoff exponencial `retry_delay * 2^(attempts - 1)`, com teto.
+- **Datas**: sempre `now()` do banco; nao usar `datetime.utcnow()` no worker.
+- **Padroes do projeto**: SQLAlchemy (`with_for_update(skip_locked=True)`) e `agenda.logging`; sem psycopg direto nem `print`.
+- **Encerramento**: ao receber SIGTERM, termina o lote atual antes de sair.
+- **Porta e adapter**: `SearchIndexPort` (upsert e delete em lote) com adapter OpenSearch; o worker nao usa o cliente OpenSearch diretamente.
+
+Estrutura:
+
+```text
+src/agenda/search/
+  ports.py               # SearchIndexPort
+  opensearch_adapter.py  # cliente e adapter OpenSearch
+  indexer.py             # EntityIndexer e AnalyzerCheck
+  registry.py            # entity_type -> indexador
+  indexers/municipality.py
+  worker.py              # poetry run python -m agenda.search.worker
+  cli.py                 # poetry run searchctl prepare
+```
+
+Ordem de execucao local: `poetry run alembic upgrade head`, `poetry run searchctl prepare` e depois um ou mais `poetry run python -m agenda.search.worker`.
+
+Settings (valores padrao):
+
+| Setting | Padrao |
+|---|---|
+| `opensearch_url` | `https://localhost:9200` |
+| `opensearch_username` | `admin` |
+| `opensearch_password` | `OPENSEARCH_PASSWORD` ou, na ausencia, `OPENSEARCH_INITIAL_ADMIN_PASSWORD` |
+| `opensearch_verify_certs` | `false` apenas em desenvolvimento |
+| `search_worker_name` | `hostname-pid` |
+| `search_worker_batch_size` | `100` |
+| `search_worker_max_attempts` | `5` |
+| `search_worker_retry_delay_seconds` | `60` |
+| `search_worker_retry_max_delay_seconds` | `3600` |
+| `search_worker_poll_interval_seconds` | `1` |
+| `search_worker_lock_timeout_seconds` | `300` |
+
+#### 9.3 Indices, analyzers e preparacao
+
+Cada indexador declara o mapping e os analyzers do seu indice. Sem eles o indice nao existe e o worker nao indexa.
+
+Analyzers obrigatorios:
+
+- `lowercase`;
+- `asciifolding` (remove acentos);
+- `edge_ngram` para autocomplete por prefixo, aplicado apenas na indexacao. A consulta usa um `search_analyzer` com `lowercase` + `asciifolding`, sem n-gram, para nao fragmentar o termo digitado.
+
+Fuzzy nao e analyzer: e parametro da consulta (`fuzziness`), tratado pela API de busca.
+
+Opcionais, avaliados por indice:
+
+- `stopwords` e `synonyms`: nao usados em `municipality` na v1, pois nomes proprios como "Sao Jose dos Campos" dependem das preposicoes;
+- `ngram`, em subcampo, para busca por trecho interno do nome;
+- `phonetic`: depende do plugin `analysis-phonetic`, que exige imagem Docker propria do OpenSearch; fora da v1.
+
+Preparacao pelo comando separado `searchctl prepare` (entrada de script do Poetry), executado antes de subir os workers:
+
+1. valida o cluster (acessivel e com saude `green` ou `yellow`);
+2. para cada indexador registrado, cria o indice `<entity_type>_v1` com settings e mapping, se ainda nao existir;
+3. cria o alias `<entity_type>` apontando para o indice, se ainda nao existir;
+4. valida os analyzers pela API `_analyze` com um texto de exemplo (ex.: "Sao Paulo" deve gerar tokens sem acento e em minusculas).
+
+O comando e idempotente: executa-lo de novo nao altera indices existentes. Mudar o mapping de um indice existente exige nova versao (`_v2`) e reindexacao, que ainda nao faz parte do escopo.
+
+##### Documento `municipality` (indice `municipality_v1`)
+
+| Campo | Tipo | Uso |
+|---|---|---|
+| `id` | `keyword` | identificador; tambem e o `_id` do documento |
+| `ibge_code` | `keyword` | busca exata pelo codigo IBGE |
+| `name` | `text` com `edge_ngram` na indexacao e `lowercase` + `asciifolding` na consulta; subcampo `keyword` para ordenacao | autocomplete |
+| `federative_unit_id` | `keyword` | filtro por UF |
+| `federative_unit_abbreviation` | `keyword` | exibicao ("Sao Paulo - SP") e filtro |
+| `federative_unit_name` | `text` com `lowercase` + `asciifolding` | exibicao e busca pelo nome da UF |
+
+O indexador monta o documento a partir de `municipality` com join em `federative_unit`, carregando o lote em uma unica consulta.
+
+#### 9.4 API de busca
+
+Rotas em `/search`, disponiveis para qualquer usuario autenticado (`require_authenticated_user`), sem exigir `platform_admin`. Convivem com as rotas administrativas de `/admin`.
+
+- `GET /search/municipalities?q=&federative_unit_id=&limit=`
+  - `q`: texto obrigatorio; com menos de 3 caracteres retorna lista vazia;
+  - `federative_unit_id`: UUID da UF, opcional;
+  - `limit`: 1 a 50, padrao 10;
+  - resposta: `{ "source": "opensearch" | "postgresql", "items": [documento municipality] }`.
+- `GET /search/federative-units`: lista de UFs para o filtro.
+
+A consulta no OpenSearch combina correspondencia por prefixo (peso maior) e `fuzziness: AUTO`, filtra por UF e ordena por relevancia e nome. O timeout da consulta e de 2 segundos; em qualquer erro do OpenSearch a API registra aviso e responde com a busca por prefixo no PostgreSQL (`search_name`), indicando `source = "postgresql"`.
+
+Tela de exemplo: `/admin/layout-lab/municipality-search` (menu "Elementos de layout" > "Consulta de municipio").
+
 ## Regras de implementacao
 
 - Toda entidade persistente Python deve derivar da base declarativa do SQLAlchemy 2.x; nao criar entidades persistentes com `dataclass`, `BaseModel` ou ORM alternativo.
@@ -270,11 +448,14 @@ Postgres e Keycloak rodam via `docker-compose.yml` na raiz do repositorio, com v
 
 O realm do Keycloak e importado automaticamente na subida (`start-dev --import-realm`) a partir de `keycloak/import/`; o fluxo de configuracao e export do realm esta documentado em [keycloak/import/README.md](keycloak/import/README.md).
 
+O OpenSearch roda em modo no unico com o plugin de seguranca ativo (HTTPS com certificado autoassinado e usuario `admin`). A senha vem de `OPENSEARCH_INITIAL_ADMIN_PASSWORD` no `.env` e deve ser forte, ou o servico nao inicia. OpenSearch (9200) e Dashboards (5601) ficam expostos apenas em `127.0.0.1`.
+
 ## Decisoes ainda em avaliacao
 
 - escolha final de hospedagem;
 - PostgreSQL/PostGIS como banco de producao;
 - mecanismo de filas para tarefas assincronas;
+- parametros do worker de `search_event` (ver secao 9.0);
 - provedor de geocodificacao e distancia;
 - provedor de notificacoes.
 

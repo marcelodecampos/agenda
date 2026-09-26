@@ -4,6 +4,9 @@ from agenda.models.gender import Gender
 from agenda.models.mixins import AuditVersionMixin
 from agenda.models.municipality import Municipality
 from agenda.models.postal_code_cache import PostalCodeCache
+from agenda.models.search_event import SearchEvent
+from agenda.models.search_event_dlq import SearchEventDlq
+from agenda.models.search_event_history import SearchEventHistory
 from agenda.models.user import (
 	BaseUser,
 	Company,
@@ -24,4 +27,7 @@ __all__ = [
 	"PostalCodeCache",
 	"Person",
 	"PersonType",
+	"SearchEvent",
+	"SearchEventDlq",
+	"SearchEventHistory",
 ]

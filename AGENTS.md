@@ -29,3 +29,4 @@ No **primeiro prompt de uma nova sessão** neste workspace, antes de iniciar qua
 - `BaseUser.nickname` representa o nome social quando informado; não criar uma coluna separada `social_name` sem novo requisito.
 - Catálogos simples de tipos ou opções usam somente `id` UUIDv7 e `description` textual única; não criar campo `code` separado nem enum fixo em Python.
 - Campos de negócio são opcionais quando possível. `BaseUser.name` é obrigatório; em catálogos simples, `id` e `description` são obrigatórios. Campos técnicos permanecem obrigatórios.
+- Quando o usuário pedir para **sincronizar/marcar uma tabela com o OpenSearch**, seguir exatamente [ARCHITECTURE.md](ARCHITECTURE.md), seção 9.1 (fonte única desses requisitos): nova migração Alembic com `DROP TRIGGER IF EXISTS`, criação do trigger usando `search_event_capture()` e carga inicial dos registros existentes. Não criar função por tabela.

@@ -78,6 +78,9 @@ services:
     restart: unless-stopped
     environment:
       OPENSEARCH_HOSTS: '["https://opensearch:9200"]'
+      OPENSEARCH_DASHBOARDS_DATA_SOURCE_ENABLED: "true"
+      OPENSEARCH_DASHBOARDS_WORKSPACE_ENABLED: "true"
+      OPENSEARCH_DASHBOARDS_EXPLORE_ENABLED: "true"
     ports:
       - "127.0.0.1:${OPENSEARCH_DASHBOARDS_PORT:-5601}:5601"
     depends_on:

@@ -18,7 +18,7 @@ def jwks_client() -> PyJWKClient:
     )
 
 
-def require_platform_admin(
+def require_authenticated_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> dict[str, Any]:
     if credentials is None:
@@ -30,7 +30,7 @@ def require_platform_admin(
 
     try:
         signing_key = jwks_client().get_signing_key_from_jwt(credentials.credentials)
-        claims = jwt.decode(
+        return jwt.decode(
             credentials.credentials,
             signing_key.key,
             algorithms=["RS256"],
@@ -44,6 +44,10 @@ def require_platform_admin(
             headers={"WWW-Authenticate": "Bearer"},
         ) from error
 
+
+def require_platform_admin(
+    claims: dict[str, Any] = Depends(require_authenticated_user),
+) -> dict[str, Any]:
     roles = claims.get("realm_access", {}).get("roles", [])
     if "platform_admin" not in roles:
         raise HTTPException(
